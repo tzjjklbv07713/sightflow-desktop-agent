@@ -218,6 +218,71 @@ function ControlPanel({
   const [logs, setLogs] = useState<LogEntry[]>([])
   const logRef = useRef<HTMLDivElement>(null)
 
+  // 首屏目标应用 + 框选状态：直接读 / 写 settings，让用户上手第一步就能完成。
+  const [appType, setAppType] = useState<AppType>('wechat')
+  const [regions, setRegions] = useState<BoxRegions | null>(null)
+  const [openingWizard, setOpeningWizard] = useState(false)
+
+  const reloadRegionsForApp = useCallback(async (type: AppType) => {
+    const r = (await window.electron?.invoke('capture:getRegions', type)) as BoxRegions | null
+    setRegions(r ?? null)
+  }, [])
+
+  // 初次加载：读出当前 appType + 对应的框选区域
+  useEffect(() => {
+    void (async () => {
+      const settings = (await window.electron?.invoke('settings:getAll')) as
+        | AppSettings
+        | undefined
+      const initial = settings?.appType || 'wechat'
+      setAppType(initial)
+      await reloadRegionsForApp(initial)
+    })()
+  }, [reloadRegionsForApp])
+
+  // 监听 main 进程的"区域已更新"事件——比如向导刚跑完
+  useEffect(() => {
+    const cleanup = window.electron?.on(
+      'capture:regions-updated',
+      (data: { appType: AppType; regions: BoxRegions | null }) => {
+        if (data.appType === appType) setRegions(data.regions)
+      }
+    )
+    return cleanup
+  }, [appType])
+
+  const handleAppTypeChange = useCallback(
+    async (next: AppType) => {
+      setAppType(next)
+      await window.electron?.invoke('settings:set', { appType: next })
+      await window.electron?.invoke('engine:updateConfig', {
+        ...((await window.electron?.invoke('settings:getAll')) as AppSettings),
+        appType: next
+      })
+      await reloadRegionsForApp(next)
+    },
+    [reloadRegionsForApp]
+  )
+
+  const handleOpenWizard = useCallback(async () => {
+    setOpeningWizard(true)
+    try {
+      const result = (await window.electron?.invoke('capture:openSetupWizard', {
+        appType
+      })) as { success: boolean; reason?: string; regions?: BoxRegions } | undefined
+      if (result?.success && result.regions) {
+        setRegions(result.regions)
+        showToast('已保存框选区域', 'success')
+      } else if (result?.reason === 'cancelled' || result?.reason === 'closed') {
+        showToast('框选已取消', 'error')
+      } else {
+        showToast('框选失败', 'error')
+      }
+    } finally {
+      setOpeningWizard(false)
+    }
+  }, [appType])
+
   const addLog = useCallback((type: LogEntry['type'], content: string) => {
     const time = new Date().toLocaleTimeString('en-US', { hour12: false })
     setLogs((prev) => [...prev.slice(-99), { time, type, content }])
@@ -247,12 +312,25 @@ function ControlPanel({
         ? t('status.error')
         : t('status.idle')
 
+  const isVlm = isVlmSupported(appType)
+  const captureReady = isVlm || regions !== null
+
   return (
     <div className="fade-in">
       <div className={`status-indicator ${status}`}>
         <div className={`status-dot ${status}`} />
         <span className="status-text">{statusLabel}</span>
       </div>
+
+      <TargetAppQuickCard
+        appType={appType}
+        regions={regions}
+        captureReady={captureReady}
+        isVlm={isVlm}
+        openingWizard={openingWizard}
+        onAppTypeChange={handleAppTypeChange}
+        onOpenWizard={handleOpenWizard}
+      />
 
       <div className="card">
         <div className="card-title">{t('control.log')}</div>
@@ -271,6 +349,89 @@ function ControlPanel({
             ))
           )}
         </div>
+      </div>
+    </div>
+  )
+}
+
+interface TargetAppQuickCardProps {
+  appType: AppType
+  regions: BoxRegions | null
+  captureReady: boolean
+  isVlm: boolean
+  openingWizard: boolean
+  onAppTypeChange: (t: AppType) => void
+  onOpenWizard: () => void
+}
+
+// 首屏的"目标应用 + 框选"快捷卡片：让新用户开箱即用，不用先翻设置。
+function TargetAppQuickCard({
+  appType,
+  regions,
+  captureReady,
+  isVlm,
+  openingWizard,
+  onAppTypeChange,
+  onOpenWizard
+}: TargetAppQuickCardProps): React.JSX.Element {
+  const statusText = isVlm
+    ? '自动识别（VLM）'
+    : regions
+      ? `已框选 ${regions.unreadIndicator ? '4' : '3'} / 4 个区域`
+      : '尚未框选'
+
+  return (
+    <div className="card" style={{ marginBottom: 12 }}>
+      <div className="card-title">目标应用</div>
+
+      <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+        <select
+          className="form-input"
+          value={appType}
+          onChange={(e) => onAppTypeChange(e.target.value as AppType)}
+          style={{ flex: 1 }}
+        >
+          {(Object.keys(APP_TYPE_LABELS) as AppType[]).map((type) => (
+            <option key={type} value={type}>
+              {APP_TYPE_LABELS[type]}
+              {!isVlmSupported(type) ? '（框选）' : ''}
+            </option>
+          ))}
+        </select>
+
+        {!isVlm && (
+          <button
+            className={regions ? 'btn btn-secondary' : 'btn btn-primary'}
+            onClick={onOpenWizard}
+            disabled={openingWizard}
+            style={{ whiteSpace: 'nowrap' }}
+          >
+            {openingWizard ? '打开中...' : regions ? '重新框选' : '开始框选'}
+          </button>
+        )}
+      </div>
+
+      <div
+        className="form-hint"
+        style={{
+          marginTop: 10,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          color: captureReady ? '#94a3b8' : '#fbbf24'
+        }}
+      >
+        <span
+          style={{
+            display: 'inline-block',
+            width: 8,
+            height: 8,
+            borderRadius: 999,
+            background: captureReady ? '#34d399' : '#fbbf24'
+          }}
+        />
+        {statusText}
+        {!isVlm && !regions ? '：点右侧按钮先把 4 个关键区域圈出来' : ''}
       </div>
     </div>
   )
