@@ -94,6 +94,76 @@
   white-space: nowrap;
 }
 
+/* mini IM-window schematic in the wizard header.
+ * Tiny on purpose: it lives next to the step text in the always-on-top header
+ * pill and never intrudes into the screen area the user is trying to frame. */
+.overlay__layout-preview {
+  position: relative;
+  width: 88px;
+  height: 56px;
+  flex-shrink: 0;
+  border-radius: 6px;
+  background: rgba(15, 23, 42, 0.55);
+  border: 1px solid rgba(148, 163, 184, 0.35);
+}
+
+.overlay__layout-cell {
+  position: absolute;
+  border-radius: 3px;
+  background: rgba(148, 163, 184, 0.22);
+  transition:
+    background 0.18s ease,
+    box-shadow 0.18s ease,
+    transform 0.18s ease;
+}
+
+/* contact list — left strip */
+.overlay__layout-cell--list {
+  left: 4px;
+  top: 4px;
+  bottom: 4px;
+  width: 22px;
+}
+
+/* chat main — top-right block */
+.overlay__layout-cell--chat {
+  left: 30px;
+  right: 4px;
+  top: 4px;
+  height: 32px;
+}
+
+/* input box — bottom-right strip */
+.overlay__layout-cell--input {
+  left: 30px;
+  right: 4px;
+  bottom: 4px;
+  height: 12px;
+}
+
+/* committed steps: solid muted blue */
+.overlay__layout-cell.is-done {
+  background: rgba(56, 189, 248, 0.45);
+}
+
+/* current step: bright + pulse so the user can match the cell to the
+ * region they should frame next. */
+.overlay__layout-cell.is-active {
+  background: rgba(56, 189, 248, 0.95);
+  box-shadow: 0 0 0 0 rgba(56, 189, 248, 0.7);
+  animation: overlayLayoutPulse 1.6s ease-in-out infinite;
+}
+
+@keyframes overlayLayoutPulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(56, 189, 248, 0.55);
+  }
+  50% {
+    box-shadow: 0 0 0 4px rgba(56, 189, 248, 0);
+  }
+}
+
 /* center crosshair: shows users *exactly* where the click will land */
 .overlay__crosshair {
   position: absolute;

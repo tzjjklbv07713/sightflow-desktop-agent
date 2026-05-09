@@ -42,10 +42,9 @@ const STEP_TITLE: Record<WizardStepKey, string> = {
 }
 
 const STEP_HINT: Record<WizardStepKey, string> = {
-  contactList: '框选你想监控的会话列表区域，例如左侧最近聊天列表。',
-  chatMain: '框选当前对话窗口（消息显示区），用来检测是否有新内容。',
-  inputBox:
-    '框选回复时要输入文字的输入框：尽量贴紧可点击区域，避免框到上面的工具栏。点击会落在矩形几何中心（红色十字位置），框完后留意十字是否正好在输入区中央，不准就重新拖。'
+  contactList: '框选左侧的会话列表区域。',
+  chatMain: '框选当前对话窗口的消息显示区。',
+  inputBox: '框选输入框，越精确越好。'
 }
 
 const MIN_DRAG_PX = 6
@@ -79,6 +78,40 @@ declare global {
       invoke: (channel: string, ...args: unknown[]) => Promise<unknown>
     }
   }
+}
+
+// Mini schematic of the IM window layout, sitting in the wizard header.
+// Three small cells (left contact list, top-right chat area, bottom-right
+// input bar) shaped like a typical IM window. The cell that maps to the
+// current step pulses; previously-committed steps stay solid; not-yet-reached
+// steps are dim. Lets the user know "next I'm framing the input bar" before
+// they even start dragging — and the schematic stays in the header so it
+// never covers the actual app the user wants to frame.
+function LayoutPreview({
+  steps,
+  stepIdx
+}: {
+  steps: WizardStepKey[]
+  stepIdx: number
+}): React.JSX.Element {
+  const stateOf = (key: WizardStepKey): 'pending' | 'active' | 'done' => {
+    const idx = steps.indexOf(key)
+    if (idx < 0 || idx > stepIdx) return 'pending'
+    if (idx === stepIdx) return 'active'
+    return 'done'
+  }
+  const cell = (key: WizardStepKey, modifier: string): React.JSX.Element => (
+    <div
+      className={`overlay__layout-cell overlay__layout-cell--${modifier} is-${stateOf(key)}`}
+    />
+  )
+  return (
+    <div className="overlay__layout-preview" aria-hidden>
+      {cell('contactList', 'list')}
+      {cell('chatMain', 'chat')}
+      {cell('inputBox', 'input')}
+    </div>
+  )
 }
 
 export function OverlayApp(): React.ReactElement {
@@ -233,6 +266,7 @@ export function OverlayApp(): React.ReactElement {
       onPointerCancel={onPointerUp}
     >
       <div className="overlay__header">
+        <LayoutPreview steps={steps} stepIdx={stepIdx} />
         <span className="overlay__step">
           步骤 {stepIdx + 1} / {total}
         </span>

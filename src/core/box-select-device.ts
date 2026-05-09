@@ -1,12 +1,13 @@
 // src/core/box-select-device.ts
-// BoxSelectDevice — DesktopDevice 的"用户手动框选 4 个区域"实现。
+// BoxSelectDevice — DesktopDevice 的"用户手动框选区域 + 单会话模式"实现。
 //
 // 与 RPADevice 的关系：两者都实现同一 DesktopDevice 接口、由 GenericChannelSession 统一驱动。
-// 区别在于"如何知道 chatEntrance / firstContact / inputBox / chatMain 在屏幕上哪里"：
-//   - RPADevice  : 用 VLM 在线推理 wechat / wework 的布局，自动落到 LayoutCache。
-//   - BoxSelectDevice: 用户在主进程的"框选向导"里手动画 4 个矩形，存到 settings，
-//     这里直接读出来用。适用于钉钉 / 飞书 / Slack / Telegram 等非 wechat 场景，
-//     以及 wechat VLM 检测失败时的兜底策略。
+// 区别在于"如何知道 chatMain / inputBox 在屏幕上哪里"：
+//   - RPADevice  : 用 VLM 在线推理 wechat / wework 的布局，并主动扫红点切换会话。
+//   - BoxSelectDevice: 用户在框选向导里手动画 3 个矩形（contactList / chatMain / inputBox）。
+//     运行时只对当前已经打开的对话窗口做"chatMain pixel diff → 输入框回复"，
+//     不去点 contactList 切换会话。适用于飞书 / 钉钉 / Slack / Telegram 等
+//     非 wechat 场景，以及 wechat VLM 检测失败时的兜底策略。
 //
 // 坐标系统一约定：BoxRegions 里的矩形都是逻辑像素的绝对屏幕坐标，与 captureScreenRegion、
 // humanLikeMove、screen.getDisplayMatching 一致；裁剪到物理像素的换算由 captureScreenRegion 内部处理。
@@ -14,7 +15,7 @@
 import { DesktopDevice } from './device'
 import { AppType, BoxRegions, ScreenRect } from './rpa/types'
 import { BBox } from './rpa/vision-utils'
-import { calculateRedDotPercentage, captureScreenRegion } from './rpa/screenshot-utils'
+import { captureScreenRegion } from './rpa/screenshot-utils'
 import { comparePngBuffers } from './rpa/image-compare'
 import {
   activeUnreadByClickAction,
@@ -23,38 +24,8 @@ import {
   sendReplyByCoordsAction
 } from './rpa/input-utils'
 
-// 红点检测阈值（百分比）。低阈值 1% 用于联系人列表整体的粗检测；高阈值 4% 用于精确锁定首联系人。
-const UNREAD_COARSE_THRESHOLD = 1
-const UNREAD_FINE_THRESHOLD = 4
-
-// 默认用 contactList 顶部一条带作为"首联系人"扫描区域。
-// 取 contactList 高度的 12%（最小 56 px、最大 120 px）作为顶部带，逻辑上对齐
-// RPADevice 的"firstContact 一般在联系人列表第一行"约定。
-const FIRST_CONTACT_BAND_RATIO = 0.12
-const FIRST_CONTACT_BAND_MIN = 56
-const FIRST_CONTACT_BAND_MAX = 120
-
 function rectCenter(rect: ScreenRect): [number, number] {
   return [rect.x + rect.width / 2, rect.y + rect.height / 2]
-}
-
-// 把 ScreenRect 包装成 DesktopDevice 接口要求的 { bbox, coordinates } 形状。
-// bbox 用占位值 [0, 0, 1000, 1000] —— BoxSelectDevice 走的是绝对屏幕坐标，
-// 上层只读 coordinates，bbox 仅是接口签名兼容。
-function rectToHitBox(rect: ScreenRect): { bbox: BBox; coordinates: [number, number] } {
-  return { bbox: [0, 0, 1000, 1000], coordinates: rectCenter(rect) }
-}
-
-// 取 contactList 顶部一条窄带，用作首联系人扫描区。
-function firstContactBand(contactList: ScreenRect): ScreenRect {
-  const ratioHeight = Math.round(contactList.height * FIRST_CONTACT_BAND_RATIO)
-  const bandHeight = Math.max(FIRST_CONTACT_BAND_MIN, Math.min(FIRST_CONTACT_BAND_MAX, ratioHeight))
-  return {
-    x: contactList.x,
-    y: contactList.y,
-    width: contactList.width,
-    height: Math.min(bandHeight, contactList.height)
-  }
 }
 
 export class BoxSelectDevice implements DesktopDevice {
@@ -121,62 +92,27 @@ export class BoxSelectDevice implements DesktopDevice {
     return result.screenshotBase64
   }
 
-  // 红点粗检测：对 unreadIndicator 区域做整图红像素占比扫描。
-  // 当用户跳过了 unreadIndicator（如 Slack/Telegram 的非红色徽标），
-  // 退化为"chatMain 像素差异 > 0 即视作未读"——配合 hasChatAreaChanged 串起来用。
+  // 单会话模式：BoxSelectDevice 只关心"当前已经打开的对话窗口里有没有新内容"，
+  // 不去扫 contactList 红点 / 点击切换会话。原因：第三方 IM（飞书 / 钉钉 / Slack 等）
+  // 联系人列表布局差异太大，「激活联系人 → 回到输入框」的来回点击经常打偏，
+  // 失败的代价很大（点错地方、误发到别的会话）。
+  //
+  // hasUnreadMessage 永远返回 false，让 GenericChannelSession 退化到 wait_retry
+  // 循环，下一轮 check_unread 时只走 hasChatAreaChanged（chatMain pixel diff）。
+  // 用户只要把目标对话窗口保持打开，新消息进来 → diff 命中 → 触发 observe_chat。
   async hasUnreadMessage(): Promise<{
     hasUnread: boolean
     chatEntranceArea?: { bbox: BBox; coordinates: [number, number] }
   }> {
-    if (!this.regions) return { hasUnread: false }
-
-    const probeRect = this.regions.unreadIndicator || this.regions.contactList
-    const result = await captureScreenRegion(probeRect)
-    if (!result.success || !result.screenshotBase64) {
-      console.warn('[BoxSelectDevice] hasUnreadMessage 截图失败:', result.error)
-      return { hasUnread: false }
-    }
-
-    if (!this.regions.unreadIndicator) {
-      // 无红点区域 → 退化为"contactList 区域只要被截到就走联系人精检测"，
-      // 让 GenericChannelSession 进入下一步 isChatContactUnread；
-      // 真正的"是否有新对话"判定交给 chatMain diff 去做。
-      return { hasUnread: true, chatEntranceArea: rectToHitBox(this.regions.contactList) }
-    }
-
-    const percentage = await calculateRedDotPercentage(result.screenshotBase64, false)
-    const hasUnread = (percentage ?? 0) >= UNREAD_COARSE_THRESHOLD
-    return {
-      hasUnread,
-      chatEntranceArea: hasUnread ? rectToHitBox(this.regions.unreadIndicator) : undefined
-    }
+    return { hasUnread: false }
   }
 
-  // 联系人精检测：扫描 contactList 顶部一条带，回退也走它。
+  // 单会话模式下不会被调用到（hasUnreadMessage 已返回 false）；保留实现以满足接口。
   async isChatContactUnread(): Promise<{
     isUnread: boolean
     firstContactCoords?: [number, number]
   }> {
-    if (!this.regions) return { isUnread: false }
-
-    const band = firstContactBand(this.regions.contactList)
-    const result = await captureScreenRegion(band)
-    if (!result.success || !result.screenshotBase64) {
-      console.warn('[BoxSelectDevice] isChatContactUnread 截图失败:', result.error)
-      return { isUnread: false }
-    }
-
-    if (!this.regions.unreadIndicator) {
-      // 同 hasUnreadMessage 的退化路径：直接判定为有未读，让上层通过 diff 确认。
-      return { isUnread: true, firstContactCoords: rectCenter(band) }
-    }
-
-    const percentage = await calculateRedDotPercentage(result.screenshotBase64, false)
-    const isUnread = (percentage ?? 0) >= UNREAD_FINE_THRESHOLD
-    return {
-      isUnread,
-      firstContactCoords: isUnread ? rectCenter(band) : undefined
-    }
+    return { isUnread: false }
   }
 
   // box-select 没有 VLM 缓存可清；no-op。
