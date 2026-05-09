@@ -8,9 +8,9 @@ import { AIClient } from '../core/ai-client'
 import { RPADevice } from '../core/rpa-device'
 import { RuntimeHost } from '../core/runtime-host'
 import {
-  createInitialWeChatChannelState,
-  WeChatChannelSession
-} from '../core/wechat-channel-session'
+  createInitialGenericChannelState,
+  GenericChannelSession
+} from '../core/generic-channel-session'
 import { AppType } from '../core/rpa/types'
 import {
   BUILTIN_DOUBAO_PROVIDER_ID,
@@ -61,7 +61,7 @@ const settingsStore = new StoreClass({
   }
 })
 
-let runtime: RuntimeHost<ReturnType<typeof createInitialWeChatChannelState>> | null = null
+let runtime: RuntimeHost<ReturnType<typeof createInitialGenericChannelState>> | null = null
 let runtimeDevice: RPADevice | null = null
 
 function createWindow(): void {
@@ -351,13 +351,13 @@ async function startEngineCore(rawConfig?: any): Promise<SkillStartResult> {
     runtimeDevice.setAppType(appType)
     runtimeDevice.setApiKey(settings.vision.apiKey)
 
-    const channel = new WeChatChannelSession(runtimeDevice)
+    const channel = new GenericChannelSession(runtimeDevice)
     const mainWindow = BrowserWindow.getAllWindows()[0]
     runtime = new RuntimeHost({
       appType,
       channel,
       provider,
-      initialState: createInitialWeChatChannelState(),
+      initialState: createInitialGenericChannelState(),
       onLog: (type, content) => {
         if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send('engine:log', { type, content })

@@ -1,51 +1,48 @@
-import { RPADevice } from './rpa-device'
-import { clearLayoutCache, getInputAreaFromCache, getLayoutCache } from './rpa/vision-utils'
+// src/core/generic-channel-session.ts
+// 通用 ChannelSession — 既驱动 RPADevice（VLM 路线），也驱动 BoxSelectDevice（手动框选路线）。
+//
+// 设计原则：本文件只依赖 DesktopDevice 接口。所有微信特定的行为（如 layoutCache 清理、
+// VLM bbox 状态同步）都封装到具体设备的 onSessionStart / onSessionStop / clearUnreadCache
+// 里，使 channel session 在不同设备之间真正可复用。
+
+import { DesktopDevice } from './device'
 import { ChannelContext, ChannelSession, ProviderEvent, SessionEvent } from './session-types'
 
-export interface WeChatChannelState {
-  searchInputBox: { bbox: [number, number, number, number]; coordinates: [number, number] } | null
-  messageInputArea: { bbox: [number, number, number, number]; coordinates: [number, number] } | null
-  chatEntranceArea: { bbox: [number, number, number, number]; coordinates: [number, number] } | null
-  firstContact: { bbox: [number, number, number, number]; coordinates: [number, number] } | null
-  chatMainArea: { bbox: [number, number, number, number]; coordinates: [number, number] } | null
-  latestChatBaseline: number | null
+export interface GenericChannelState {
   measuredAt: number | null
+  latestChatBaseline: number | null
 }
 
-export function createInitialWeChatChannelState(): WeChatChannelState {
+export function createInitialGenericChannelState(): GenericChannelState {
   return {
-    searchInputBox: null,
-    messageInputArea: null,
-    chatEntranceArea: null,
-    firstContact: null,
-    chatMainArea: null,
-    latestChatBaseline: null,
-    measuredAt: null
+    measuredAt: null,
+    latestChatBaseline: null
   }
 }
 
-export class WeChatChannelSession implements ChannelSession<WeChatChannelState> {
+export class GenericChannelSession implements ChannelSession<GenericChannelState> {
   private readonly retryDelayMs = 5000
   private consecutiveUnreadFailures = 0
 
-  constructor(private readonly device: RPADevice) {}
+  constructor(private readonly device: DesktopDevice) {}
 
-  async onStart(ctx: ChannelContext<WeChatChannelState>): Promise<void> {
+  async onStart(ctx: ChannelContext<GenericChannelState>): Promise<void> {
     this.device.setAppType(ctx.appType)
     this.device.clearChatBaseline()
     this.consecutiveUnreadFailures = 0
     this.resetState(ctx.state)
+    await this.device.onSessionStart?.()
     ctx.host.enqueue({ type: 'bootstrap' })
   }
 
-  async onStop(ctx: ChannelContext<WeChatChannelState>): Promise<void> {
+  async onStop(ctx: ChannelContext<GenericChannelState>): Promise<void> {
     this.device.clearChatBaseline()
     this.consecutiveUnreadFailures = 0
-    clearLayoutCache(ctx.appType)
+    await this.device.onSessionStop?.()
     this.resetState(ctx.state)
   }
 
-  async onEvent(event: SessionEvent, ctx: ChannelContext<WeChatChannelState>): Promise<void> {
+  async onEvent(event: SessionEvent, ctx: ChannelContext<GenericChannelState>): Promise<void> {
     this.device.setAppType(ctx.appType)
 
     switch (event.type) {
@@ -59,7 +56,7 @@ export class WeChatChannelSession implements ChannelSession<WeChatChannelState> 
           return
         }
 
-        this.syncStateFromCache(ctx)
+        ctx.state.measuredAt = Date.now()
         ctx.host.log('thinking', '聊天窗口识别完成')
         ctx.host.enqueue({ type: 'observe_chat' })
         break
@@ -67,7 +64,6 @@ export class WeChatChannelSession implements ChannelSession<WeChatChannelState> 
 
       case 'observe_chat': {
         const screenshot = await this.device.screenshot()
-        this.syncStateFromCache(ctx)
         void this.forwardProviderEvents(screenshot, ctx)
         break
       }
@@ -129,10 +125,7 @@ export class WeChatChannelSession implements ChannelSession<WeChatChannelState> 
           break
         }
 
-        ctx.host.log(
-          'thinking',
-          '检测到未读消息，正在尝试打开会话'
-        )
+        ctx.host.log('thinking', '检测到未读消息，正在尝试打开会话')
         await this.device.activeUnreadByClick(chatEntranceCoords)
         await this.sleep(150 + Math.random() * 100)
 
@@ -153,9 +146,7 @@ export class WeChatChannelSession implements ChannelSession<WeChatChannelState> 
       case 'wait_retry':
         ctx.host.log('skip', '等待下一轮未读检测')
         ctx.host.schedule(
-          event.reason === 'provider_error'
-            ? { type: 'observe_chat' }
-            : { type: 'check_unread' },
+          event.reason === 'provider_error' ? { type: 'observe_chat' } : { type: 'check_unread' },
           event.delayMs ?? this.retryDelayMs
         )
         break
@@ -164,7 +155,7 @@ export class WeChatChannelSession implements ChannelSession<WeChatChannelState> 
 
   private async forwardProviderEvents(
     screenshot: string,
-    ctx: ChannelContext<WeChatChannelState>
+    ctx: ChannelContext<GenericChannelState>
   ): Promise<void> {
     try {
       for await (const event of ctx.host.runProvider({
@@ -178,11 +169,9 @@ export class WeChatChannelSession implements ChannelSession<WeChatChannelState> 
           ctx.host.enqueue(sessionEvent)
         }
       }
-    } catch (error: any) {
-      ctx.host.enqueue({
-        type: 'provider.error',
-        error: error?.message || String(error)
-      })
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error)
+      ctx.host.enqueue({ type: 'provider.error', error: message })
     }
   }
 
@@ -201,28 +190,13 @@ export class WeChatChannelSession implements ChannelSession<WeChatChannelState> 
     }
   }
 
-  private syncStateFromCache(ctx: ChannelContext<WeChatChannelState>): void {
-    const cache = getLayoutCache(ctx.appType)
-    ctx.state.searchInputBox = cache?.searchInputBox || null
-    ctx.state.chatEntranceArea = cache?.chatEntranceArea || null
-    ctx.state.firstContact = cache?.firstContact || null
-    ctx.state.chatMainArea = cache?.chatMainArea || null
-    ctx.state.messageInputArea = getInputAreaFromCache(ctx.appType)
-    ctx.state.measuredAt = Date.now()
-  }
-
-  private resetState(state: WeChatChannelState): void {
-    state.searchInputBox = null
-    state.messageInputArea = null
-    state.chatEntranceArea = null
-    state.firstContact = null
-    state.chatMainArea = null
-    state.latestChatBaseline = null
+  private resetState(state: GenericChannelState): void {
     state.measuredAt = null
+    state.latestChatBaseline = null
   }
 
   private async tryOpenUnreadConversation(
-    ctx: ChannelContext<WeChatChannelState>
+    ctx: ChannelContext<GenericChannelState>
   ): Promise<'opened' | 'contact_not_ready'> {
     let contactResult = await this.device.isChatContactUnread()
 

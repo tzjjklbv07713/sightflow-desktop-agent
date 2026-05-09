@@ -36,18 +36,15 @@ export interface CompareOptions {
 }
 
 /**
- * 比较两张 NativeImage（Electron）的差异
+ * 底层：直接对两段 PNG buffer 做 pixelmatch 对比。
+ * 解耦了 Electron NativeImage，BoxSelectDevice 用这个版本，避免引 NativeImage。
  */
-export function compareImages(
-  img1: Electron.NativeImage,
-  img2: Electron.NativeImage,
+export function comparePngBuffers(
+  buf1: Buffer,
+  buf2: Buffer,
   options: CompareOptions = {}
 ): CompareResult {
   const { threshold = 0.1, changeThreshold = 0.5 } = options
-
-  // 转为 PNG Buffer
-  const buf1 = img1.toPNG()
-  const buf2 = img2.toPNG()
 
   const png1 = PNG.sync.read(buf1)
   const png2 = PNG.sync.read(buf2)
@@ -77,11 +74,10 @@ export function compareImages(
     }
   }
 
-  // pixelmatch 对比
   const diffPixelCount = pixelmatch(
     png1.data as unknown as Uint8Array,
     png2.data as unknown as Uint8Array,
-    undefined, // 不生成 diff 图
+    undefined,
     width,
     height,
     { threshold }
@@ -98,6 +94,17 @@ export function compareImages(
     diffPixelCount,
     totalPixels
   }
+}
+
+/**
+ * 比较两张 NativeImage（Electron）的差异
+ */
+export function compareImages(
+  img1: Electron.NativeImage,
+  img2: Electron.NativeImage,
+  options: CompareOptions = {}
+): CompareResult {
+  return comparePngBuffers(img1.toPNG(), img2.toPNG(), options)
 }
 
 /**

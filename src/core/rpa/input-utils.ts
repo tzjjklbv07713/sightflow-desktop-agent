@@ -116,11 +116,67 @@ const getWeChatInputPosition = (bounds: any, scaleFactor: number) => {
 }
 
 /**
- * 业务原子 2：极简防检测回复模式
- * 1. 坐标计算：获取输入框焦点坐标
- * 2. 隐式鼠标点击目标输入框
- * 3. 推入剪贴板，Cmd+V注入
- * 4. Enter发送
+ * 业务原子 2 — 核心实现：按给定坐标发送消息（不依赖 VLM 缓存）。
+ * `sendReplyAction`（VLM 路线）与 `BoxSelectDevice.sendMessage`（框选路线）共用此函数。
+ *
+ * 1. humanLikeMove → 输入框焦点坐标 (x, y)
+ * 2. 隐式鼠标左键点击聚焦
+ * 3. 剪贴板 + Cmd/Ctrl+V 粘贴
+ * 4. Enter 发送
+ */
+export async function sendReplyByCoordsAction(
+  x: number,
+  y: number,
+  text: string
+): Promise<boolean> {
+  const robot = getRobot()
+  if (!robot) {
+    console.error('[sendReplyByCoordsAction] RobotJS 缺失')
+    return false
+  }
+
+  try {
+    await humanLikeMove(x, y)
+    await randomDelayIn(100, 200)
+
+    robot.mouseClick('left')
+    await randomDelayIn(200, 300)
+
+    clipboard.writeText(text)
+    await randomDelayIn(50, 100)
+
+    if (IS_MAC) {
+      robot.keyTap('v', ['command'])
+    } else {
+      robot.keyTap('v', ['control'])
+    }
+
+    await randomDelayIn(300, 500)
+
+    robot.keyTap('enter')
+
+    if (IS_WINDOWS) {
+      robot.keyTap('enter', ['control'])
+      await randomDelayIn(40, 60)
+      robot.keyTap('backspace')
+    } else {
+      robot.keyTap('enter', ['command'])
+      await randomDelayIn(20, 40)
+      robot.keyToggle('command', 'up')
+      await randomDelayIn(20, 40)
+      robot.keyTap('backspace')
+    }
+
+    return true
+  } catch (err: any) {
+    console.error('[sendReplyByCoordsAction] Failed:', err)
+    return false
+  }
+}
+
+/**
+ * 业务原子 2：极简防检测回复模式（VLM 路线适配器）。
+ * 从 layout cache 中找输入框坐标，缺失时回退到经验公式，最终调用 `sendReplyByCoordsAction`。
  */
 export async function sendReplyAction(appType: AppType, text: string): Promise<boolean> {
   const windowInfo = await getWindowInfo(appType, false)
@@ -128,13 +184,7 @@ export async function sendReplyAction(appType: AppType, text: string): Promise<b
     console.error('[sendReplyAction] 无法获取窗口信息')
     return false
   }
-  
-  const robot = getRobot()
-  if (!robot) {
-    console.error('[sendReplyAction] RobotJS 缺失')
-    return false
-  }
-  
+
   let inputX: number | undefined
   let inputY: number | undefined
 
@@ -153,48 +203,18 @@ export async function sendReplyAction(appType: AppType, text: string): Promise<b
     inputX = pos.inputX
     inputY = pos.inputY
   }
-  
-  try {
-    // 1. Move and click internally to focus
-    await humanLikeMove(inputX, inputY)
-    await randomDelayIn(100, 200)
-    
-    robot.mouseClick('left')
-    await randomDelayIn(200, 300)
-    
-    // 2. Put text in clipboard
-    clipboard.writeText(text)
-    await randomDelayIn(50, 100)
-    
-    // 3. Paste
-    if (IS_MAC) {
-      robot.keyTap('v', ['command'])
-    } else {
-      robot.keyTap('v', ['control'])
-    }
-    
-    await randomDelayIn(300, 500)
-    
-    // 4. Send Message (Using whatsapp-agent-demo best practices)
-    robot.keyTap('enter')
-    
-    if (IS_WINDOWS) {
-      robot.keyTap('enter', ['control'])
-      await randomDelayIn(40, 60)
-      robot.keyTap('backspace')
-    } else {
-      robot.keyTap('enter', ['command'])
-      await randomDelayIn(20, 40)
-      robot.keyToggle('command', 'up')
-      await randomDelayIn(20, 40)
-      robot.keyTap('backspace')
-    }
-    
-    return true
-  } catch (err: any) {
-    console.error('[sendReplyAction] Failed:', err)
-    return false
-  }
+
+  return sendReplyByCoordsAction(inputX, inputY, text)
+}
+
+export type ClickPolicy = 'single' | 'double'
+
+/**
+ * 默认点击策略：仅微信桌面端需要双击红点切换会话；
+ * 企业微信、钉钉、飞书、Slack、Telegram 以及任何 generic 应用都用单击。
+ */
+export function defaultClickPolicy(appType: AppType): ClickPolicy {
+  return appType === 'wechat' ? 'double' : 'single'
 }
 
 /**
@@ -202,22 +222,27 @@ export async function sendReplyAction(appType: AppType, text: string): Promise<b
  *
  * 参考 whatsapp-agent-demo 的 activeUnreadByClick：
  * - 微信场景：双击红点区域（单击只是展开，双击才会切换）
- * - 企业微信场景：单击即可
+ * - 企业微信、通用 IM 场景：单击即可
+ *
+ * 旧签名 (coords, appType) 仍然支持；想显式指定策略时传第三个参数。
  */
 export async function activeUnreadByClickAction(
   coordinates: [number, number],
-  appType: AppType
+  appType: AppType,
+  clickPolicy?: ClickPolicy
 ): Promise<void> {
   const robot = getRobot()
   if (!robot) return
 
   const [centerX, centerY] = coordinates
-  const isSingleClick = appType === 'wework'
+  const policy: ClickPolicy = clickPolicy ?? defaultClickPolicy(appType)
+  const isSingleClick = policy === 'single'
 
   console.log(`[activeUnreadByClick] ${isSingleClick ? '单击' : '双击'}红点`, {
     centerX,
     centerY,
-    appType
+    appType,
+    policy
   })
 
   // 移动鼠标到红点中心
@@ -226,7 +251,7 @@ export async function activeUnreadByClickAction(
   // 移动后的随机延迟（150-250ms）
   await randomDelayIn(150, 250)
 
-  // 根据 appType 执行单击或双击
+  // 根据 policy 执行单击或双击
   robot.mouseClick('left')
   if (!isSingleClick) {
     // 双击：第二次点击

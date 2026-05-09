@@ -20,6 +20,7 @@ import {
   clearChatBaseline as clearChatBaselineFn
 } from './rpa/image-compare'
 import {
+  clearLayoutCache,
   detectUnreadArea as detectUnreadAreaFn,
   detectWechatLayout,
   getInputAreaFromCache,
@@ -39,6 +40,13 @@ export class RPADevice implements DesktopDevice {
   setApiKey(apiKey: string): void {
     if (!apiKey) return
     this.aiClient = new AIClient({ apiKey })
+  }
+
+  // ── 生命周期 ──
+  // 旧实现里 clearLayoutCache 由 WeChatChannelSession.onStop 调用。改用 GenericChannelSession 之后，
+  // 把这个微信特定的清理动作下沉到设备的 onSessionStop hook 里，让 channel session 不必感知 appType。
+  onSessionStop(): void {
+    clearLayoutCache(this.appType)
   }
 
   // ── 感知层 ──
