@@ -5,13 +5,16 @@ import icon from '../../resources/icon.png?asset'
 import { checkAndRequestPermissions } from './permission'
 import Store from 'electron-store'
 import { AIClient } from '../core/ai-client'
+import { DesktopDevice } from '../core/device'
 import { RPADevice } from '../core/rpa-device'
+import { BoxSelectDevice } from '../core/box-select-device'
 import { RuntimeHost } from '../core/runtime-host'
 import {
-  createInitialWeChatChannelState,
-  WeChatChannelSession
-} from '../core/wechat-channel-session'
-import { AppType } from '../core/rpa/types'
+  createInitialGenericChannelState,
+  GenericChannelSession
+} from '../core/generic-channel-session'
+import { AppType, BoxRegions, CaptureStrategy, isWechatLike } from '../core/rpa/types'
+import { runBoxSelectWizard, type WizardStepKey } from './overlay-window'
 import {
   BUILTIN_DOUBAO_PROVIDER_ID,
   getBuiltinDoubaoInstalledInfo,
@@ -34,6 +37,11 @@ const StoreClass = typeof Store === 'function' ? Store : ((Store as any).default
 const FIXED_ARK_MODEL = 'doubao-seed-2-0-lite-260215'
 const FIXED_ARK_BASE_URL = 'https://ark.cn-beijing.volces.com/api/v3'
 
+interface PerAppCapture {
+  strategy: CaptureStrategy
+  regions: BoxRegions | null
+}
+
 interface AppSettings {
   locale: 'zh' | 'en'
   appType: AppType
@@ -45,6 +53,10 @@ interface AppSettings {
     installed: InstalledProviderInfo | null
     config: Record<string, any>
   }
+  // 默认抓取策略（仅当 appType 没有 per-app 覆盖时生效）
+  defaultCaptureStrategy: CaptureStrategy
+  // 每个 appType 独立保存的策略 + 框选区域
+  capture: Partial<Record<AppType, PerAppCapture>>
 }
 
 const settingsStore = new StoreClass({
@@ -57,12 +69,14 @@ const settingsStore = new StoreClass({
       manifestUrl: '',
       installed: null,
       config: {}
-    }
+    },
+    defaultCaptureStrategy: 'auto',
+    capture: {}
   }
 })
 
-let runtime: RuntimeHost<ReturnType<typeof createInitialWeChatChannelState>> | null = null
-let runtimeDevice: RPADevice | null = null
+let runtime: RuntimeHost<ReturnType<typeof createInitialGenericChannelState>> | null = null
+let runtimeDevice: DesktopDevice | null = null
 
 function createWindow(): void {
   // Create the browser window.
@@ -132,20 +146,25 @@ app.whenReady().then(async () => {
   })
 
   ipcMain.handle('settings:set', async (_event, data: Record<string, any>) => {
+    const current = normalizeSettings(settingsStore.store)
     const next = {
-      ...normalizeSettings(settingsStore.store),
+      ...current,
       ...data,
       vision: {
-        ...normalizeSettings(settingsStore.store).vision,
+        ...current.vision,
         ...(data.vision || {})
       },
       chatProvider: {
-        ...normalizeSettings(settingsStore.store).chatProvider,
+        ...current.chatProvider,
         ...(data.chatProvider || {}),
         config: {
-          ...normalizeSettings(settingsStore.store).chatProvider.config,
+          ...current.chatProvider.config,
           ...(data.chatProvider?.config || {})
         }
+      },
+      capture: {
+        ...current.capture,
+        ...(data.capture || {})
       }
     } satisfies AppSettings
 
@@ -220,6 +239,7 @@ app.whenReady().then(async () => {
   ipcMain.handle('engine:updateConfig', async (_event, config) => {
     const settings = normalizeSettings(config || settingsStore.store)
     if (runtimeDevice) {
+      // setApiKey 在 BoxSelectDevice 上是 no-op，对 RPADevice 才生效。
       runtimeDevice.setApiKey(settings.vision.apiKey)
       runtimeDevice.setAppType(settings.appType)
     }
@@ -237,6 +257,58 @@ app.whenReady().then(async () => {
       baseURL: FIXED_ARK_BASE_URL
     })
     return client.testConnection()
+  })
+
+  // ── Capture / 框选向导 IPC ──
+
+  ipcMain.handle(
+    'capture:openSetupWizard',
+    async (_event, args: { appType: AppType; steps?: WizardStepKey[] }) => {
+      const settings = normalizeSettings(settingsStore.store)
+      const appType = coerceAppType(args?.appType)
+      const prefill = settings.capture[appType]?.regions ?? null
+
+      const result = await runBoxSelectWizard({ appType, steps: args?.steps, prefill })
+      if (!result.ok || !result.regions) {
+        return { success: false, reason: result.reason || 'cancelled' }
+      }
+
+      // 持久化区域到 settings.capture[appType]，但保留已有 strategy（默认 'auto'）
+      const current = normalizeSettings(settingsStore.store)
+      const next: AppSettings = {
+        ...current,
+        capture: {
+          ...current.capture,
+          [appType]: {
+            strategy: current.capture[appType]?.strategy ?? 'auto',
+            regions: result.regions
+          }
+        }
+      }
+      settingsStore.set(next as any)
+      notifyCaptureRegionsUpdated(appType, result.regions)
+      return { success: true, regions: result.regions }
+    }
+  )
+
+  ipcMain.handle('capture:getRegions', async (_event, appType: AppType) => {
+    const settings = normalizeSettings(settingsStore.store)
+    return settings.capture[coerceAppType(appType)]?.regions ?? null
+  })
+
+  ipcMain.handle('capture:resetRegions', async (_event, appType: AppType) => {
+    const current = normalizeSettings(settingsStore.store)
+    const key = coerceAppType(appType)
+    const next: AppSettings = {
+      ...current,
+      capture: {
+        ...current.capture,
+        [key]: { strategy: current.capture[key]?.strategy ?? 'auto', regions: null }
+      }
+    }
+    settingsStore.set(next as any)
+    notifyCaptureRegionsUpdated(key, null)
+    return { success: true }
   })
 
   // IPC test
@@ -301,8 +373,13 @@ async function startEngineCore(rawConfig?: any): Promise<SkillStartResult> {
   try {
     const settings = normalizeSettings(rawConfig || settingsStore.store)
     const appType: AppType = settings.appType || 'wechat'
+    const startupStrategy = resolveSettingsStrategy(appType, settings)
+    const providerNeedsVisionKey =
+      !settings.chatProvider.installed ||
+      settings.chatProvider.installed.id === BUILTIN_DOUBAO_PROVIDER_ID
+    const needsVisionKey = startupStrategy === 'vlm' || providerNeedsVisionKey
 
-    if (!settings.vision.apiKey) {
+    if (needsVisionKey && !settings.vision.apiKey) {
       return { ok: false, reason: 'no_vision_key', message: '请先填写视觉接口密钥' }
     }
 
@@ -315,12 +392,9 @@ async function startEngineCore(rawConfig?: any): Promise<SkillStartResult> {
       })
       provider = loaded.provider
     } else {
-      const installedManifest = await getInstalledProviderManifest(
-        settings.chatProvider.installed
-      )
+      const installedManifest = await getInstalledProviderManifest(settings.chatProvider.installed)
       // doubao（无论是用户主动装的还是内置的）apiKey 由视觉密钥共享提供，不强校验
-      const isDoubao =
-        settings.chatProvider.installed.id === BUILTIN_DOUBAO_PROVIDER_ID
+      const isDoubao = settings.chatProvider.installed.id === BUILTIN_DOUBAO_PROVIDER_ID
       const required = (installedManifest?.configSchema?.required || []).filter(
         (key) => !(isDoubao && key === 'apiKey')
       )
@@ -340,29 +414,40 @@ async function startEngineCore(rawConfig?: any): Promise<SkillStartResult> {
         ? { ...settings.chatProvider.config, apiKey: settings.vision.apiKey }
         : settings.chatProvider.config
 
-      const loaded = await loadInstalledProvider(
-        settings.chatProvider.installed,
-        effectiveConfig
-      )
+      const loaded = await loadInstalledProvider(settings.chatProvider.installed, effectiveConfig)
       provider = loaded.provider
     }
 
-    runtimeDevice = new RPADevice()
-    runtimeDevice.setAppType(appType)
-    runtimeDevice.setApiKey(settings.vision.apiKey)
+    const mainWindow = BrowserWindow.getAllWindows().find((w) => !w.isDestroyed()) ?? null
+    const log = (type: 'thinking' | 'reply' | 'skip' | 'error', content: string): void => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('engine:log', { type, content })
+      }
+    }
 
-    const channel = new WeChatChannelSession(runtimeDevice)
-    const mainWindow = BrowserWindow.getAllWindows()[0]
+    let device: DesktopDevice
+    let strategy: CaptureStrategy
+    try {
+      const built = await buildDevice(appType, settings, settings.vision.apiKey, log)
+      device = built.device
+      strategy = built.strategy
+    } catch (err: any) {
+      const message = err?.message || String(err)
+      if (message === 'user_cancelled_box_select_wizard') {
+        return { ok: false, reason: 'wizard_cancelled', message: '已取消框选，引擎未启动' }
+      }
+      throw err
+    }
+    log('thinking', `已选用抓取策略：${strategy}`)
+    runtimeDevice = device
+
+    const channel = new GenericChannelSession(device)
     runtime = new RuntimeHost({
       appType,
       channel,
       provider,
-      initialState: createInitialWeChatChannelState(),
-      onLog: (type, content) => {
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('engine:log', { type, content })
-        }
-      }
+      initialState: createInitialGenericChannelState(),
+      onLog: log
     })
 
     runtime.startSession().catch((err: any) => {
@@ -407,6 +492,90 @@ function notifyEngineStateChanged(status: 'running' | 'idle'): void {
   }
 }
 
+/** 通知 Renderer：某个 appType 的框选区域被向导/重置更新了，UI 上的 chip 立即重渲染。 */
+function notifyCaptureRegionsUpdated(appType: AppType, regions: BoxRegions | null): void {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) {
+      win.webContents.send('capture:regions-updated', { appType, regions })
+    }
+  }
+}
+
+/**
+ * 选取实际生效的 capture strategy。
+ * 用户在 settings 里给 appType 显式设置过策略，就用它；否则用全局默认；
+ * 全局默认是 'auto' 时，wechat/wework 优先 VLM，其它直接 box-select。
+ */
+function resolveEffectiveStrategy(
+  appType: AppType,
+  perAppStrategy: CaptureStrategy,
+  defaultStrategy: CaptureStrategy
+): CaptureStrategy {
+  const effective = perAppStrategy === 'auto' ? defaultStrategy : perAppStrategy
+  if (effective === 'auto') {
+    return isWechatLike(appType) ? 'vlm' : 'box-select'
+  }
+  return effective
+}
+
+function resolveSettingsStrategy(appType: AppType, settings: AppSettings): CaptureStrategy {
+  const perApp = settings.capture[appType] ?? { strategy: 'auto' as CaptureStrategy, regions: null }
+  return resolveEffectiveStrategy(appType, perApp.strategy, settings.defaultCaptureStrategy)
+}
+
+/**
+ * 把 capture 配置 + strategy 解析成具体设备实例。
+ * VLM 和 box-select 只决定"如何测量 LayoutCache"，后续运行统一消费 LayoutCache。
+ * 本轮不做 VLM 失败自动 fallback；VLM 测量失败由 session bootstrap 报错停止。
+ */
+async function buildDevice(
+  appType: AppType,
+  settings: AppSettings,
+  apiKey: string,
+  log: (type: 'thinking' | 'reply' | 'skip' | 'error', content: string) => void
+): Promise<{ device: DesktopDevice; strategy: CaptureStrategy }> {
+  const perApp = settings.capture[appType] ?? { strategy: 'auto' as CaptureStrategy, regions: null }
+  const effective = resolveSettingsStrategy(appType, settings)
+
+  if (effective === 'vlm') {
+    const rpa = new RPADevice()
+    rpa.setAppType(appType)
+    rpa.setApiKey(apiKey)
+    return { device: rpa, strategy: 'vlm' }
+  }
+
+  // box-select 路线：缺区域则拉向导
+  let regions = perApp.regions
+  if (!regions) {
+    log('thinking', `首次配置 ${appType}：请框选 3 个关键区域`)
+    const wizardResult = await runBoxSelectWizard({ appType, prefill: null })
+    if (!wizardResult.ok || !wizardResult.regions) {
+      throw new Error('user_cancelled_box_select_wizard')
+    }
+    regions = wizardResult.regions
+    persistRegionsAndStickyStrategy(appType, regions, perApp.strategy)
+  }
+  return { device: new BoxSelectDevice(regions), strategy: 'box-select' }
+}
+
+/** 把向导产出的 regions 写回 settings，并保留当前策略配置。 */
+function persistRegionsAndStickyStrategy(
+  appType: AppType,
+  regions: BoxRegions,
+  strategy: CaptureStrategy
+): void {
+  const current = normalizeSettings(settingsStore.store)
+  const next: AppSettings = {
+    ...current,
+    capture: {
+      ...current.capture,
+      [appType]: { strategy, regions }
+    }
+  }
+  settingsStore.set(next as any)
+  notifyCaptureRegionsUpdated(appType, regions)
+}
+
 const skillEngineController: SkillEngineController = {
   start: () => startEngineCore(),
   pause: () => stopEngineCore('skill_pause'),
@@ -416,12 +585,81 @@ const skillEngineController: SkillEngineController = {
 // In this file you can include the rest of your app's specific main process
 // code. You can also put them in separate files and require them here.
 
+const VALID_APP_TYPES: AppType[] = [
+  'wechat',
+  'wework',
+  'dingtalk',
+  'lark',
+  'slack',
+  'telegram',
+  'generic'
+]
+const VALID_CAPTURE_STRATEGIES: CaptureStrategy[] = ['auto', 'vlm', 'box-select']
+
+function coerceAppType(raw: unknown): AppType {
+  return typeof raw === 'string' && (VALID_APP_TYPES as string[]).includes(raw)
+    ? (raw as AppType)
+    : 'wechat'
+}
+
+function coerceStrategy(raw: unknown, fallback: CaptureStrategy = 'auto'): CaptureStrategy {
+  return typeof raw === 'string' && (VALID_CAPTURE_STRATEGIES as string[]).includes(raw)
+    ? (raw as CaptureStrategy)
+    : fallback
+}
+
+function coerceRect(raw: unknown): BoxRegions['contactList'] | null {
+  if (!raw || typeof raw !== 'object') return null
+  const r = raw as Record<string, unknown>
+  const x = Number(r.x),
+    y = Number(r.y),
+    w = Number(r.width),
+    h = Number(r.height)
+  if (![x, y, w, h].every((n) => Number.isFinite(n))) return null
+  return { x, y, width: w, height: h }
+}
+
+function coerceRegions(raw: unknown): BoxRegions | null {
+  if (!raw || typeof raw !== 'object') return null
+  const r = raw as Record<string, unknown>
+  const contactList = coerceRect(r.contactList)
+  const chatMain = coerceRect(r.chatMain)
+  const inputBox = coerceRect(r.inputBox)
+  if (!contactList || !chatMain || !inputBox) return null
+  return {
+    contactList,
+    chatMain,
+    inputBox,
+    unreadIndicator: coerceRect(r.unreadIndicator),
+    displayId: typeof r.displayId === 'number' ? r.displayId : undefined,
+    scaleFactor: typeof r.scaleFactor === 'number' ? r.scaleFactor : undefined,
+    capturedAt: typeof r.capturedAt === 'number' ? r.capturedAt : Date.now()
+  }
+}
+
+function normalizeCapture(raw: unknown): Partial<Record<AppType, PerAppCapture>> {
+  const out: Partial<Record<AppType, PerAppCapture>> = {}
+  if (!raw || typeof raw !== 'object') return out
+  for (const key of VALID_APP_TYPES) {
+    const value = (raw as Record<string, unknown>)[key]
+    if (!value || typeof value !== 'object') continue
+    const v = value as Record<string, unknown>
+    out[key] = {
+      strategy: coerceStrategy(v.strategy),
+      regions: coerceRegions(v.regions)
+    }
+  }
+  return out
+}
+
 function normalizeSettings(raw: any): AppSettings {
   const oldApiKey = typeof raw?.apiKey === 'string' ? raw.apiKey : ''
   const oldModel = typeof raw?.model === 'string' && raw.model ? raw.model : FIXED_ARK_MODEL
   const oldSystemPrompt = typeof raw?.systemPrompt === 'string' ? raw.systemPrompt : ''
   const rawProviderConfig =
-    raw?.chatProvider?.config && typeof raw.chatProvider.config === 'object' ? { ...raw.chatProvider.config } : {}
+    raw?.chatProvider?.config && typeof raw.chatProvider.config === 'object'
+      ? { ...raw.chatProvider.config }
+      : {}
 
   // Keep arbitrary provider config keys, and only backfill legacy volcengine fields for old persisted settings.
   if (rawProviderConfig.apiKey === undefined && oldApiKey) {
@@ -436,8 +674,7 @@ function normalizeSettings(raw: any): AppSettings {
 
   return {
     locale: raw?.locale === 'en' ? 'en' : 'zh',
-    // Keep reading historical `weixin` values from persisted settings.
-    appType: raw?.appType === 'wework' ? 'wework' : 'wechat',
+    appType: coerceAppType(raw?.appType),
     vision: {
       apiKey: raw?.vision?.apiKey || oldApiKey || ''
     },
@@ -445,7 +682,9 @@ function normalizeSettings(raw: any): AppSettings {
       manifestUrl: raw?.chatProvider?.manifestUrl || raw?.providerManifestUrl || '',
       installed: raw?.chatProvider?.installed || null,
       config: rawProviderConfig
-    }
+    },
+    defaultCaptureStrategy: coerceStrategy(raw?.defaultCaptureStrategy, 'auto'),
+    capture: normalizeCapture(raw?.capture)
   }
 }
 

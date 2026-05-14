@@ -1,7 +1,7 @@
 import { intToRGBA, Jimp } from 'jimp'
-import { desktopCapturer } from 'electron'
+import { desktopCapturer, screen } from 'electron'
 import { getWindowInfo, getWechatWindowInfo } from './window-utils'
-import { AppType } from './types'
+import { AppType, ScreenRect } from './types'
 
 const IS_MAC = process.platform === 'darwin'
 
@@ -213,6 +213,69 @@ export async function captureWechatWindow(
 }
 
 /**
+ * 按绝对屏幕坐标矩形截图（box-select 路线用）。
+ *
+ * `rect` 是逻辑像素的绝对屏幕坐标（来自用户框选向导）。函数会查到该坐标所在
+ * 显示器，按 scaleFactor 转成物理像素裁剪，返回 base64 dataURL + NativeImage。
+ *
+ * 没有像 captureWechatWindow 那样的缓存：BoxSelectDevice 自己控制采集节奏，
+ * 一次轮询里 hasUnreadMessage / hasChatAreaChanged 都是各自截图各自比较，
+ * 多余缓存反而引入"diff 不刷新"的微妙 bug。
+ */
+export async function captureScreenRegion(rect: ScreenRect): Promise<{
+  success: boolean
+  screenshotBase64?: string
+  nativeImage?: Electron.NativeImage
+  error?: string
+  display?: { id: number; bounds: Electron.Rectangle; scaleFactor: number }
+}> {
+  try {
+    const display = screen.getDisplayMatching({
+      x: rect.x,
+      y: rect.y,
+      width: Math.max(1, rect.width),
+      height: Math.max(1, rect.height)
+    })
+
+    const scaleFactor = display.scaleFactor || 1
+    const physicalWidth = Math.round(display.bounds.width * scaleFactor)
+    const physicalHeight = Math.round(display.bounds.height * scaleFactor)
+
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('desktopCapturer timeout')), 5000)
+    })
+    const screenSources = (await Promise.race([
+      desktopCapturer.getSources({
+        types: ['screen'],
+        thumbnailSize: { width: physicalWidth, height: physicalHeight }
+      }),
+      timeoutPromise
+    ])) as Electron.DesktopCapturerSource[]
+
+    const matchedSource =
+      screenSources.find((s) => String(s.display_id) === String(display.id)) || screenSources[0]
+    if (!matchedSource) return { success: false, error: '未找到匹配的屏幕源' }
+
+    const cropRect = {
+      x: Math.round((rect.x - display.bounds.x) * scaleFactor),
+      y: Math.round((rect.y - display.bounds.y) * scaleFactor),
+      width: Math.max(1, Math.round(rect.width * scaleFactor)),
+      height: Math.max(1, Math.round(rect.height * scaleFactor))
+    }
+
+    const cropped = matchedSource.thumbnail.crop(cropRect)
+    return {
+      success: true,
+      screenshotBase64: cropped.toDataURL(),
+      nativeImage: cropped,
+      display: { id: display.id, bounds: display.bounds, scaleFactor }
+    }
+  } catch (err: any) {
+    return { success: false, error: err?.message || String(err) }
+  }
+}
+
+/**
  * 截图 chatMainArea 区域，返回 NativeImage
  *
  * 从 LayoutCache 获取 chatMainArea.bbox → 计算 crop 区域 → 局部截图
@@ -224,8 +287,22 @@ export async function captureChatMainArea(appType: AppType): Promise<Electron.Na
     const { getLayoutCache, bboxToCropBounds } = await import('./vision-utils')
 
     const layout = getLayoutCache(appType)
-    if (!layout?.chatMainArea?.bbox) {
+    if (!layout?.chatMainArea) {
       console.log('[captureChatMainArea] 未找到 chatMainArea 缓存')
+      return null
+    }
+
+    if (layout.chatMainArea.rect) {
+      const screenshotResult = await captureScreenRegion(layout.chatMainArea.rect)
+      if (!screenshotResult.success || !screenshotResult.nativeImage) {
+        console.log('[captureChatMainArea] 绝对区域截图失败:', screenshotResult.error)
+        return null
+      }
+      return screenshotResult.nativeImage
+    }
+
+    if (!layout.chatMainArea.bbox) {
+      console.log('[captureChatMainArea] chatMainArea 缺少 bbox/rect')
       return null
     }
 

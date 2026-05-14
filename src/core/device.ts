@@ -3,6 +3,11 @@
 //
 // 当前主路径里，这个接口由 ChannelSession 依赖，用于统一访问宿主应用的感知与动作能力。
 // 旧的 hook-based 编排已移除，宿主编排只保留 Runtime / Channel / Provider 这条主线。
+//
+// 当前实现：
+// - `RPADevice` 用 VLM 测量 LayoutCache。
+// - `BoxSelectDevice` 用用户框选结果测量 LayoutCache。
+// 两条路径后续都通过 LayoutCache 消费位置。
 
 import { AppType } from './rpa/types'
 import { BBox } from './rpa/vision-utils'
@@ -12,11 +17,17 @@ export interface DesktopDevice {
   setAppType(appType: AppType): void
   setApiKey(apiKey: string): void
 
+  // ── 生命周期 ──
+  // session 启停时由 GenericChannelSession 调用，给设备机会做缓存初始化 / 清理。
+  // 默认实现可为 no-op；设备在 onSessionStop 里清掉布局和 baseline。
+  onSessionStart?(): Promise<void> | void
+  onSessionStop?(): Promise<void> | void
+
   // ── 感知层 ──
 
   /**
-   * 启动时一次性布局测量（VLM 定位 chatEntrance / firstContact / inputArea 并缓存）
-   * 返回 true 表示测量成功，后续 hasUnreadMessage 可直接用缓存做红点扫描
+   * 启动时一次性布局测量。
+   * VLM / box-select 都产出统一 LayoutCache，后续截图、diff、发送只消费 LayoutCache。
    */
   measureLayout(): Promise<{ success: boolean; error?: string }>
 
@@ -25,7 +36,8 @@ export interface DesktopDevice {
 
   /**
    * Step 1 粗检测：聊天入口是否有红点？
-   * 内部流程: VLM 定位 chatEntranceArea → 局部 crop → 红点像素扫描
+   * 内部流程: 定位 chatEntranceArea / contactList → 局部 crop → 红点像素扫描。
+   * 缺少未读切换位置时返回无未读，session 会回到 chatMain diff 轮询。
    */
   hasUnreadMessage(): Promise<{
     hasUnread: boolean
@@ -34,7 +46,7 @@ export interface DesktopDevice {
 
   /**
    * Step 2 细检测：第一个联系人头像是否有红点？
-   * 内部流程: VLM 定位 firstContact → 局部 crop → 红点扫描 + 边缘分析 + 自适应重试
+   * 内部流程: 定位 firstContact → 局部 crop → 红点扫描 + 边缘分析 + 自适应重试
    */
   isChatContactUnread(): Promise<{
     isUnread: boolean
@@ -42,8 +54,8 @@ export interface DesktopDevice {
   }>
 
   /**
-   * 清除未读区域的 VLM 坐标缓存（chatEntranceArea + firstContact）
-   * 当连续检测失败时，清除缓存强制重新检测
+   * 清除未读区域的坐标缓存（chatEntranceArea + firstContact）。
+   * 清除未读区域缓存。
    */
   clearUnreadCache(): void
 
@@ -73,7 +85,7 @@ export interface DesktopDevice {
 
   /**
    * 点击红点区域激活未读消息（视觉路线）
-   * 微信场景双击，企业微信场景单击
+   * 微信场景双击，其他场景单击（具体由设备根据 appType 决定）
    */
   activeUnreadByClick(coordinates: [number, number]): Promise<void>
 

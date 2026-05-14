@@ -20,6 +20,7 @@ export type SkillStartReason =
   | 'missing_required_field'
   | 'engine_failed'
   | 'already_running'
+  | 'wizard_cancelled'
 
 export type SkillPauseReason = 'not_running' | 'pause_failed'
 
@@ -86,7 +87,8 @@ const START_STATUS_MAP: Record<SkillStartReason, number> = {
   no_vision_key: 400,
   no_provider: 400,
   missing_required_field: 400,
-  engine_failed: 500
+  engine_failed: 500,
+  wizard_cancelled: 409
 }
 
 const PAUSE_STATUS_MAP: Record<SkillPauseReason, number> = {
@@ -181,10 +183,7 @@ function handleStatus(res: http.ServerResponse): void {
   })
 }
 
-async function requestHandler(
-  req: http.IncomingMessage,
-  res: http.ServerResponse
-): Promise<void> {
+async function requestHandler(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   const { method, url } = req
 
   if (method === 'OPTIONS') {

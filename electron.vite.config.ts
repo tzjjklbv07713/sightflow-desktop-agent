@@ -20,6 +20,16 @@ export default defineConfig({
         '@renderer': resolve('src/renderer/src')
       }
     },
-    plugins: [react()]
+    plugins: [react()],
+    build: {
+      rollupOptions: {
+        input: {
+          index: resolve(__dirname, 'src/renderer/index.html'),
+          // Box-select wizard runs in a separate transparent BrowserWindow
+          // and loads its own React tree; second entry keeps its bundle isolated.
+          overlay: resolve(__dirname, 'src/renderer/overlay.html')
+        }
+      }
+    }
   }
 })

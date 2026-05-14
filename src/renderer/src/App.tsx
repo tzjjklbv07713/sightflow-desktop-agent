@@ -11,7 +11,42 @@ interface LogEntry {
 
 type EngineStatus = 'idle' | 'running' | 'error'
 type View = 'control' | 'settings'
-type AppType = 'wechat' | 'wework'
+type AppType = 'wechat' | 'wework' | 'dingtalk' | 'lark' | 'slack' | 'telegram' | 'generic'
+
+type CaptureStrategy = 'auto' | 'vlm' | 'box-select'
+
+interface ScreenRect {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+interface BoxRegions {
+  contactList: ScreenRect
+  chatMain: ScreenRect
+  inputBox: ScreenRect
+  unreadIndicator: ScreenRect | null
+  displayId?: number
+  scaleFactor?: number
+  capturedAt: number
+}
+
+const APP_TYPE_LABELS: Record<AppType, string> = {
+  wechat: '微信',
+  wework: '企业微信',
+  dingtalk: '钉钉',
+  lark: '飞书 / Lark',
+  slack: 'Slack',
+  telegram: 'Telegram',
+  generic: '其他桌面应用'
+}
+
+const VLM_SUPPORTED_APPS: AppType[] = ['wechat', 'wework']
+
+function isVlmSupported(appType: AppType): boolean {
+  return VLM_SUPPORTED_APPS.includes(appType)
+}
 
 interface ProviderSchemaField {
   type: 'string' | 'password' | 'select' | 'boolean'
@@ -42,6 +77,11 @@ interface InstalledProviderInfo {
   installedAt: string
 }
 
+interface PerAppCapture {
+  strategy: CaptureStrategy
+  regions: BoxRegions | null
+}
+
 interface AppSettings {
   locale: 'zh' | 'en'
   appType: AppType
@@ -53,6 +93,8 @@ interface AppSettings {
     installed: InstalledProviderInfo | null
     config: Record<string, any>
   }
+  defaultCaptureStrategy: CaptureStrategy
+  capture: Partial<Record<AppType, PerAppCapture>>
 }
 
 const PROVIDER_NAME_LABELS: Record<string, string> = {
@@ -78,14 +120,28 @@ const StopIcon = () => (
 )
 
 const GearIcon = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+  <svg
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.8"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+  >
     <circle cx="12" cy="12" r="3" />
     <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
   </svg>
 )
 
 const BackIcon = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+  <svg
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+  >
     <path d="M19 12H5M12 19l-7-7 7-7" />
   </svg>
 )
@@ -97,12 +153,9 @@ function App() {
   // Sync UI status with engine state changes triggered out-of-band
   // (e.g. remote OpenClaw start/pause via the local skill HTTP server).
   useEffect(() => {
-    const cleanup = window.electron?.on(
-      'engine:state',
-      (data: { status: 'running' | 'idle' }) => {
-        setStatus(data.status === 'running' ? 'running' : 'idle')
-      }
-    )
+    const cleanup = window.electron?.on('engine:state', (data: { status: 'running' | 'idle' }) => {
+      setStatus(data.status === 'running' ? 'running' : 'idle')
+    })
     return cleanup
   }, [])
 
@@ -130,11 +183,7 @@ function App() {
       </div>
 
       {view === 'control' && (
-        <BottomBar
-          status={status}
-          setStatus={setStatus}
-          onSettings={() => setView('settings')}
-        />
+        <BottomBar status={status} setStatus={setStatus} onSettings={() => setView('settings')} />
       )}
 
       <Toast />
@@ -142,7 +191,10 @@ function App() {
   )
 }
 
-function getProviderDisplayName(provider: InstalledProviderInfo | null | undefined, manifest: ProviderManifest | null) {
+function getProviderDisplayName(
+  provider: InstalledProviderInfo | null | undefined,
+  manifest: ProviderManifest | null
+) {
   return (
     (provider?.id && PROVIDER_NAME_LABELS[provider.id]) ||
     (manifest?.id && PROVIDER_NAME_LABELS[manifest.id]) ||
@@ -165,6 +217,73 @@ function ControlPanel({
 }) {
   const [logs, setLogs] = useState<LogEntry[]>([])
   const logRef = useRef<HTMLDivElement>(null)
+
+  // 首屏目标应用 + 框选状态：直接读 / 写 settings，让用户上手第一步就能完成。
+  const [appType, setAppType] = useState<AppType>('wechat')
+  const [regions, setRegions] = useState<BoxRegions | null>(null)
+  const [openingWizard, setOpeningWizard] = useState(false)
+
+  const reloadRegionsForApp = useCallback(async (type: AppType) => {
+    const r = (await window.electron?.invoke('capture:getRegions', type)) as BoxRegions | null
+    setRegions(r ?? null)
+  }, [])
+
+  // 初次加载：读出当前 appType + 对应的框选区域
+  useEffect(() => {
+    void (async () => {
+      const settings = (await window.electron?.invoke('settings:getAll')) as
+        | AppSettings
+        | undefined
+      const initial = settings?.appType || 'wechat'
+      setAppType(initial)
+      await reloadRegionsForApp(initial)
+    })()
+  }, [reloadRegionsForApp])
+
+  // 监听 main 进程的"区域已更新"事件——比如向导刚跑完
+  useEffect(() => {
+    const cleanup = window.electron?.on(
+      'capture:regions-updated',
+      (data: { appType: AppType; regions: BoxRegions | null }) => {
+        if (data.appType === appType) setRegions(data.regions)
+      }
+    )
+    return cleanup
+  }, [appType])
+
+  const handleAppTypeChange = useCallback(
+    async (next: AppType) => {
+      if (status === 'running') return
+      setAppType(next)
+      await window.electron?.invoke('settings:set', { appType: next })
+      await window.electron?.invoke('engine:updateConfig', {
+        ...((await window.electron?.invoke('settings:getAll')) as AppSettings),
+        appType: next
+      })
+      await reloadRegionsForApp(next)
+    },
+    [reloadRegionsForApp, status]
+  )
+
+  const handleOpenWizard = useCallback(async () => {
+    if (status === 'running') return
+    setOpeningWizard(true)
+    try {
+      const result = (await window.electron?.invoke('capture:openSetupWizard', {
+        appType
+      })) as { success: boolean; reason?: string; regions?: BoxRegions } | undefined
+      if (result?.success && result.regions) {
+        setRegions(result.regions)
+        showToast('已保存框选区域', 'success')
+      } else if (result?.reason === 'cancelled' || result?.reason === 'closed') {
+        showToast('框选已取消', 'error')
+      } else {
+        showToast('框选失败', 'error')
+      }
+    } finally {
+      setOpeningWizard(false)
+    }
+  }, [appType, status])
 
   const addLog = useCallback((type: LogEntry['type'], content: string) => {
     const time = new Date().toLocaleTimeString('en-US', { hour12: false })
@@ -195,12 +314,26 @@ function ControlPanel({
         ? t('status.error')
         : t('status.idle')
 
+  const isVlm = isVlmSupported(appType)
+  const captureReady = isVlm || regions !== null
+
   return (
     <div className="fade-in">
       <div className={`status-indicator ${status}`}>
         <div className={`status-dot ${status}`} />
         <span className="status-text">{statusLabel}</span>
       </div>
+
+      <TargetAppQuickCard
+        appType={appType}
+        regions={regions}
+        captureReady={captureReady}
+        isVlm={isVlm}
+        openingWizard={openingWizard}
+        running={status === 'running'}
+        onAppTypeChange={handleAppTypeChange}
+        onOpenWizard={handleOpenWizard}
+      />
 
       <div className="card">
         <div className="card-title">{t('control.log')}</div>
@@ -219,6 +352,123 @@ function ControlPanel({
             ))
           )}
         </div>
+      </div>
+    </div>
+  )
+}
+
+interface TargetAppQuickCardProps {
+  appType: AppType
+  regions: BoxRegions | null
+  captureReady: boolean
+  isVlm: boolean
+  openingWizard: boolean
+  running: boolean
+  onAppTypeChange: (t: AppType) => void
+  onOpenWizard: () => void
+}
+
+// 首屏的"目标应用 + 框选"快捷卡片：让新用户开箱即用，不用先翻设置。
+function TargetAppQuickCard({
+  appType,
+  regions,
+  captureReady,
+  isVlm,
+  openingWizard,
+  running,
+  onAppTypeChange,
+  onOpenWizard
+}: TargetAppQuickCardProps): React.JSX.Element {
+  const statusText = isVlm
+    ? '自动识别（VLM）'
+    : regions
+      ? '已框选 3 / 3 个区域'
+      : '尚未框选'
+
+  return (
+    <div className="card" style={{ marginBottom: 12 }}>
+      <div className="card-title">目标应用</div>
+
+      <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+        <select
+          className="form-input"
+          value={appType}
+          onChange={(e) => onAppTypeChange(e.target.value as AppType)}
+          disabled={running || openingWizard}
+          style={{ flex: 1 }}
+        >
+          {(Object.keys(APP_TYPE_LABELS) as AppType[]).map((type) => (
+            <option key={type} value={type}>
+              {APP_TYPE_LABELS[type]}
+              {!isVlmSupported(type) ? '（框选）' : ''}
+            </option>
+          ))}
+        </select>
+
+        {!isVlm && (
+          <button
+            className="btn btn-primary"
+            onClick={onOpenWizard}
+            disabled={running || openingWizard}
+            style={{
+              whiteSpace: 'nowrap',
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 6
+            }}
+          >
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2.4"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden
+            >
+              {regions ? (
+                // 重新框选 — 旋转刷新图标
+                <>
+                  <path d="M21 12a9 9 0 1 1-3-6.7" />
+                  <path d="M21 4v5h-5" />
+                </>
+              ) : (
+                // 开始框选 — 矩形 + 十字
+                <>
+                  <rect x="3" y="3" width="18" height="18" rx="2" />
+                  <line x1="12" y1="8" x2="12" y2="16" />
+                  <line x1="8" y1="12" x2="16" y2="12" />
+                </>
+              )}
+            </svg>
+            {openingWizard ? '打开中...' : regions ? '重新框选' : '开始框选'}
+          </button>
+        )}
+      </div>
+
+      <div
+        className="form-hint"
+        style={{
+          marginTop: 10,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          color: captureReady ? '#94a3b8' : '#fbbf24'
+        }}
+      >
+        <span
+          style={{
+            display: 'inline-block',
+            width: 8,
+            height: 8,
+            borderRadius: 999,
+            background: captureReady ? '#34d399' : '#fbbf24'
+          }}
+        />
+        {statusText}
+        {!isVlm && !regions ? '：点右侧按钮先把 3 个关键区域圈出来' : ''}
       </div>
     </div>
   )
@@ -294,7 +544,8 @@ function BottomBar({
 }
 
 function SettingsPanel() {
-  const [appType, setAppType] = useState<AppType>('wechat')
+  // 设置页只关心 vision API key 和 chat provider；目标应用 + 框选已经搬到首屏
+  // ControlPanel 里的 TargetAppQuickCard，避免两处冗余配置造成困惑。
   const [visionApiKey, setVisionApiKey] = useState('')
   const [providerManifestUrl, setProviderManifestUrl] = useState('')
   const [installedProvider, setInstalledProvider] = useState<InstalledProviderInfo | null>(null)
@@ -309,7 +560,6 @@ function SettingsPanel() {
     const load = async () => {
       const settings = (await window.electron?.invoke('settings:getAll')) as AppSettings | undefined
       if (settings) {
-        setAppType(settings.appType || 'wechat')
         setVisionApiKey(settings.vision?.apiKey || '')
         setProviderManifestUrl(settings.chatProvider?.manifestUrl || '')
         setInstalledProvider(settings.chatProvider?.installed || null)
@@ -337,18 +587,16 @@ function SettingsPanel() {
 
   const handleSaveVision = useCallback(async () => {
     const payload: Partial<AppSettings> = {
-      appType,
       vision: { apiKey: visionApiKey }
     }
-
     await window.electron?.invoke('settings:set', payload)
     await window.electron?.invoke('engine:updateConfig', {
-      ...(await window.electron?.invoke('settings:getAll')),
+      ...((await window.electron?.invoke('settings:getAll')) as AppSettings),
       ...payload,
       vision: { apiKey: visionApiKey }
     })
     showToast(t('settings.saved'), 'success')
-  }, [appType, visionApiKey])
+  }, [visionApiKey])
 
   const handleInstallProvider = useCallback(async () => {
     if (!providerManifestUrl.trim()) {
@@ -358,7 +606,10 @@ function SettingsPanel() {
 
     setInstalling(true)
     try {
-      const result = await window.electron?.invoke('provider:installFromUrl', providerManifestUrl.trim())
+      const result = await window.electron?.invoke(
+        'provider:installFromUrl',
+        providerManifestUrl.trim()
+      )
       if (!result?.success) {
         showToast(result?.error || t('settings.providerInstall.failed'), 'error')
         return
@@ -401,13 +652,7 @@ function SettingsPanel() {
     })
 
     showToast(t('settings.provider.saved'), 'success')
-  }, [
-    installedManifest,
-    installedProvider,
-    providerConfig,
-    providerManifestUrl,
-    isBuiltinDefault
-  ])
+  }, [installedManifest, installedProvider, providerConfig, providerManifestUrl, isBuiltinDefault])
 
   const handleTestConnection = useCallback(async () => {
     if (!visionApiKey) return
@@ -432,18 +677,6 @@ function SettingsPanel() {
     <div className="slide-up">
       <div className="card" style={{ marginBottom: 16 }}>
         <div className="card-title">{t('settings.vision')}</div>
-
-        <div className="form-group">
-          <label className="form-label">{t('settings.appType')}</label>
-          <select
-            className="form-input"
-            value={appType}
-            onChange={(e) => setAppType(e.target.value as AppType)}
-          >
-            <option value="wechat">微信</option>
-            <option value="wework">企业微信</option>
-          </select>
-        </div>
 
         <div className="form-group">
           <label className="form-label">{t('settings.visionApiKey')}</label>
@@ -482,6 +715,7 @@ function SettingsPanel() {
         </div>
       </div>
 
+
       <div className="card">
         <div className="card-title">{t('settings.chatProvider')}</div>
 
@@ -517,9 +751,12 @@ function SettingsPanel() {
           <div className="form-group">
             <label className="form-label">{t('settings.providerInstalled')}</label>
             <div className="form-hint">
-              {getProviderDisplayName(installedProvider, installedManifest)} · {installedProvider.version}
+              {getProviderDisplayName(installedProvider, installedManifest)} ·{' '}
+              {installedProvider.version}
             </div>
-            <div className="form-hint">{new Date(installedProvider.installedAt).toLocaleString()}</div>
+            <div className="form-hint">
+              {new Date(installedProvider.installedAt).toLocaleString()}
+            </div>
           </div>
         ) : null}
 
@@ -535,7 +772,11 @@ function SettingsPanel() {
               />
             ))}
 
-            <button className="btn btn-primary" onClick={handleSaveProvider} style={{ width: '100%' }}>
+            <button
+              className="btn btn-primary"
+              onClick={handleSaveProvider}
+              style={{ width: '100%' }}
+            >
               {t('settings.provider.save')}
             </button>
           </>
