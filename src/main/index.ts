@@ -59,6 +59,57 @@ interface AppSettings {
   capture: Partial<Record<AppType, PerAppCapture>>
 }
 
+type ProviderConfigFieldType = 'text' | 'password' | 'url' | 'select' | 'textarea'
+
+type ProviderConfigField = {
+  key: string
+  label: string
+  type: ProviderConfigFieldType
+  required?: boolean
+  readonly?: boolean
+  placeholder?: string
+  hint?: string
+  defaultValue?: string
+  options?: Array<{ label: string; value: string }>
+}
+
+type ProviderCatalogItem = {
+  id: string
+  name: string
+  description?: string
+  version: string
+  manifestUrl: string
+  capabilities?: string[]
+  configSchema: {
+    fields: ProviderConfigField[]
+  }
+}
+
+type ProviderHubCache = {
+  sourceUrl: string
+  fetchedAt: string
+  providers: ProviderCatalogItem[]
+}
+
+type ProviderHubEntry = {
+  id?: unknown
+  enabled?: unknown
+  manifestUrl?: unknown
+}
+
+type ProviderHubManifest = {
+  id?: unknown
+  name?: unknown
+  description?: unknown
+  version?: unknown
+  capabilities?: unknown
+  configSchema?: unknown
+}
+
+const DEFAULT_PROVIDER_HUB_URL =
+  process.env.SIGHTFLOW_PROVIDER_HUB_URL || 'https://sightflow.dev/provider-hub.json'
+const PROVIDER_HUB_CACHE_KEY = 'providerHubCache'
+
 const settingsStore = new StoreClass({
   name: 'settings',
   defaults: {
@@ -77,6 +128,7 @@ const settingsStore = new StoreClass({
 
 let runtime: RuntimeHost<ReturnType<typeof createInitialGenericChannelState>> | null = null
 let runtimeDevice: DesktopDevice | null = null
+let settingsWindow: BrowserWindow | null = null
 
 function createWindow(): void {
   // Create the browser window.
@@ -113,6 +165,187 @@ function createWindow(): void {
   } else {
     mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
   }
+}
+
+function createSettingsWindow(): void {
+  if (settingsWindow && !settingsWindow.isDestroyed()) {
+    settingsWindow.show()
+    settingsWindow.focus()
+    return
+  }
+
+  settingsWindow = new BrowserWindow({
+    width: 900,
+    height: 720,
+    minWidth: 860,
+    minHeight: 640,
+    show: false,
+    autoHideMenuBar: true,
+    titleBarStyle: 'hiddenInset',
+    trafficLightPosition: { x: 14, y: 14 },
+    backgroundColor: '#0a0b10',
+    ...(process.platform === 'linux' ? { icon } : {}),
+    webPreferences: {
+      preload: join(__dirname, '../preload/index.js'),
+      sandbox: false
+    }
+  })
+
+  settingsWindow.on('ready-to-show', () => {
+    settingsWindow?.show()
+  })
+
+  settingsWindow.on('closed', () => {
+    settingsWindow = null
+  })
+
+  settingsWindow.webContents.setWindowOpenHandler((details) => {
+    shell.openExternal(details.url)
+    return { action: 'deny' }
+  })
+
+  if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
+    settingsWindow.loadURL(`${process.env['ELECTRON_RENDERER_URL']}?window=settings`)
+  } else {
+    settingsWindow.loadFile(join(__dirname, '../renderer/index.html'), {
+      query: { window: 'settings' }
+    })
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+function normalizeFieldType(value: unknown, format?: unknown): ProviderConfigFieldType {
+  if (value === 'password' || value === 'url' || value === 'select' || value === 'textarea') {
+    return value
+  }
+  if (format === 'password') return 'password'
+  if (format === 'uri' || format === 'url') return 'url'
+  return 'text'
+}
+
+function normalizeOptions(value: unknown): Array<{ label: string; value: string }> | undefined {
+  if (!Array.isArray(value)) return undefined
+  const options = value
+    .map((item) => {
+      if (typeof item === 'string') return { label: item, value: item }
+      if (!isRecord(item)) return null
+      const label = typeof item.label === 'string' ? item.label : String(item.value || '')
+      const optionValue = typeof item.value === 'string' ? item.value : ''
+      return optionValue ? { label, value: optionValue } : null
+    })
+    .filter(Boolean) as Array<{ label: string; value: string }>
+  return options.length ? options : undefined
+}
+
+function normalizeManifestConfigFields(configSchema: unknown): ProviderConfigField[] {
+  if (!isRecord(configSchema)) return []
+
+  const required = Array.isArray(configSchema.required)
+    ? configSchema.required.filter((key): key is string => typeof key === 'string')
+    : []
+
+  if (Array.isArray(configSchema.fields)) {
+    return configSchema.fields
+      .map((field) => {
+        if (!isRecord(field) || typeof field.key !== 'string') return null
+        return {
+          key: field.key,
+          label: typeof field.label === 'string' ? field.label : field.key,
+          type: normalizeFieldType(field.type),
+          required: field.required === true || required.includes(field.key),
+          readonly: field.readonly === true,
+          placeholder: typeof field.placeholder === 'string' ? field.placeholder : undefined,
+          hint: typeof field.hint === 'string' ? field.hint : undefined,
+          defaultValue: typeof field.defaultValue === 'string' ? field.defaultValue : undefined,
+          options: normalizeOptions(field.options)
+        }
+      })
+      .filter(Boolean) as ProviderConfigField[]
+  }
+
+  if (!isRecord(configSchema.properties)) return []
+
+  return Object.entries(configSchema.properties).map(([key, property]) => {
+    const schema = isRecord(property) ? property : {}
+    const title = typeof schema.title === 'string' ? schema.title : key
+    return {
+      key,
+      label: title,
+      type: normalizeFieldType(schema.type, schema.format),
+      required: required.includes(key),
+      readonly: schema.readonly === true || schema.readOnly === true,
+      placeholder: typeof schema.placeholder === 'string' ? schema.placeholder : undefined,
+      hint: typeof schema.description === 'string' ? schema.description : undefined,
+      defaultValue: typeof schema.default === 'string' ? schema.default : undefined,
+      options: normalizeOptions(schema.enum)
+    }
+  })
+}
+
+async function fetchJson(url: string): Promise<unknown> {
+  const response = await fetch(url)
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status} ${response.statusText}`)
+  }
+  return response.json()
+}
+
+function getCachedProviderHub(): ProviderHubCache | null {
+  const cached = settingsStore.get(PROVIDER_HUB_CACHE_KEY)
+  if (!isRecord(cached) || !Array.isArray(cached.providers)) return null
+  return cached as ProviderHubCache
+}
+
+async function fetchProviderHub(url = DEFAULT_PROVIDER_HUB_URL): Promise<ProviderHubCache> {
+  const hub = await fetchJson(url)
+  if (!isRecord(hub) || !Array.isArray(hub.providers)) {
+    throw new Error('Provider hub JSON must contain a providers array')
+  }
+
+  const providers = await Promise.all(
+    (hub.providers as ProviderHubEntry[])
+      .filter((entry) => entry?.enabled !== false && typeof entry?.manifestUrl === 'string')
+      .map(async (entry) => {
+        const manifestUrl = entry.manifestUrl as string
+        const manifest = (await fetchJson(manifestUrl)) as ProviderHubManifest
+        const id =
+          typeof manifest.id === 'string'
+            ? manifest.id
+            : typeof entry.id === 'string'
+              ? entry.id
+              : manifestUrl
+        const name = typeof manifest.name === 'string' ? manifest.name : id
+        const version = typeof manifest.version === 'string' ? manifest.version : '0.0.0'
+        const capabilities = Array.isArray(manifest.capabilities)
+          ? manifest.capabilities.filter((item): item is string => typeof item === 'string')
+          : undefined
+        const description =
+          typeof manifest.description === 'string' ? manifest.description : undefined
+
+        return {
+          id,
+          name,
+          description,
+          version,
+          manifestUrl,
+          capabilities,
+          configSchema: {
+            fields: normalizeManifestConfigFields(manifest.configSchema)
+          }
+        }
+      })
+  )
+
+  const cache = {
+    sourceUrl: url,
+    fetchedAt: new Date().toISOString(),
+    providers
+  }
+  settingsStore.set(PROVIDER_HUB_CACHE_KEY, cache)
+  return cache
 }
 
 // This method will be called when Electron has finished
@@ -217,6 +450,35 @@ app.whenReady().then(async () => {
       manifest,
       isBuiltinDefault: true
     }
+  })
+
+  ipcMain.handle('providerHub:getCatalog', async () => {
+    const cached = getCachedProviderHub()
+    if (cached) return { success: true, catalog: cached }
+
+    try {
+      const catalog = await fetchProviderHub()
+      return { success: true, catalog }
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error)
+      return { success: false, error: message, catalog: null }
+    }
+  })
+
+  ipcMain.handle('providerHub:update', async () => {
+    try {
+      const catalog = await fetchProviderHub()
+      return { success: true, catalog }
+    } catch (error: unknown) {
+      const cached = getCachedProviderHub()
+      const message = error instanceof Error ? error.message : String(error)
+      return { success: false, error: message, catalog: cached }
+    }
+  })
+
+  ipcMain.handle('settings:open', async () => {
+    createSettingsWindow()
+    return { success: true }
   })
 
   // ── Runtime / Session IPC（沿用 legacy engine:* 通道名） ──

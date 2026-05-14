@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect } from 'react'
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
 import { t } from './i18n'
 import logoUrl from './assets/logo.png'
 import './index.css'
@@ -10,7 +10,7 @@ interface LogEntry {
 }
 
 type EngineStatus = 'idle' | 'running' | 'error'
-type View = 'control' | 'settings'
+type SettingsSection = 'base' | 'agent'
 type AppType = 'wechat' | 'wework' | 'dingtalk' | 'lark' | 'slack' | 'telegram' | 'generic'
 
 type CaptureStrategy = 'auto' | 'vlm' | 'box-select'
@@ -77,6 +77,44 @@ interface InstalledProviderInfo {
   installedAt: string
 }
 
+type ProviderConfigFieldType = 'text' | 'password' | 'url' | 'select' | 'textarea'
+
+interface ProviderConfigField {
+  key: string
+  label: string
+  type: ProviderConfigFieldType
+  required?: boolean
+  readonly?: boolean
+  placeholder?: string
+  hint?: string
+  defaultValue?: string
+  options?: Array<{ label: string; value: string }>
+}
+
+interface ProviderCatalogItem {
+  id: string
+  name: string
+  description?: string
+  version: string
+  manifestUrl: string
+  capabilities?: string[]
+  configSchema: {
+    fields: ProviderConfigField[]
+  }
+}
+
+interface ProviderHubCache {
+  sourceUrl: string
+  fetchedAt: string
+  providers: ProviderCatalogItem[]
+}
+
+interface ProviderHubResult {
+  success: boolean
+  error?: string
+  catalog?: ProviderHubCache | null
+}
+
 interface PerAppCapture {
   strategy: CaptureStrategy
   regions: BoxRegions | null
@@ -97,15 +135,47 @@ interface AppSettings {
   capture: Partial<Record<AppType, PerAppCapture>>
 }
 
-const PROVIDER_NAME_LABELS: Record<string, string> = {
-  'volcengine-ark': '火山方舟聊天服务'
-}
-
-const PROVIDER_FIELD_LABELS: Record<string, string> = {
-  apiKey: '接口密钥',
-  model: '模型名称',
-  systemPrompt: '系统提示词'
-}
+const BUILTIN_PROVIDER_CATALOG: ProviderCatalogItem[] = [
+  {
+    id: 'doubao',
+    name: '豆包 Seed',
+    description: '本地内置聊天 Provider，使用基础配置中的火山方舟密钥。',
+    version: '1.0.0',
+    manifestUrl: 'builtin://doubao',
+    capabilities: ['chat'],
+    configSchema: {
+      fields: [
+        {
+          key: 'apiKey',
+          label: 'API Key',
+          type: 'password',
+          required: true,
+          placeholder: '输入火山方舟 API Key'
+        },
+        {
+          key: 'model',
+          label: '模型',
+          type: 'text',
+          required: true,
+          readonly: true,
+          defaultValue: 'doubao-seed-2-0-lite-260428'
+        },
+        {
+          key: 'baseURL',
+          label: 'Base URL',
+          type: 'url',
+          placeholder: 'https://ark.cn-beijing.volces.com/api/v3'
+        },
+        {
+          key: 'systemPrompt',
+          label: '系统提示词',
+          type: 'textarea',
+          placeholder: '你是一个微信自动回复助手。根据截图中的聊天内容，生成合适的回复...'
+        }
+      ]
+    }
+  }
+]
 
 const PlayIcon = () => (
   <svg viewBox="0 0 24 24" fill="currentColor">
@@ -133,7 +203,7 @@ const GearIcon = () => (
   </svg>
 )
 
-const BackIcon = () => (
+const RefreshIcon = (): React.JSX.Element => (
   <svg
     viewBox="0 0 24 24"
     fill="none"
@@ -142,12 +212,15 @@ const BackIcon = () => (
     strokeLinecap="round"
     strokeLinejoin="round"
   >
-    <path d="M19 12H5M12 19l-7-7 7-7" />
+    <path d="M21 12a9 9 0 0 1-15.1 6.6" />
+    <path d="M3 12A9 9 0 0 1 18.1 5.4" />
+    <path d="M18 2v4h-4" />
+    <path d="M6 22v-4h4" />
   </svg>
 )
 
 function App() {
-  const [view, setView] = useState<View>('control')
+  const isSettingsWindow = new URLSearchParams(window.location.search).get('window') === 'settings'
   const [status, setStatus] = useState<EngineStatus>('idle')
 
   // Sync UI status with engine state changes triggered out-of-band
@@ -159,53 +232,30 @@ function App() {
     return cleanup
   }, [])
 
+  if (isSettingsWindow) {
+    return (
+      <div className="app settings-window">
+        <SettingsWindow />
+        <Toast />
+      </div>
+    )
+  }
+
   return (
     <div className="app">
       <header className="app-header">
-        {view === 'settings' ? (
-          <button
-            className="bottom-btn bottom-btn-settings"
-            onClick={() => setView('control')}
-            style={{ width: 32, height: 32, marginRight: 4 }}
-          >
-            <BackIcon />
-          </button>
-        ) : null}
         <img src={logoUrl} alt="SightFlow" className="app-logo" />
       </header>
 
       <div className="app-content">
-        {view === 'control' ? (
-          <ControlPanel status={status} setStatus={setStatus} />
-        ) : (
-          <SettingsPanel />
-        )}
+        <ControlPanel status={status} setStatus={setStatus} />
       </div>
 
-      {view === 'control' && (
-        <BottomBar status={status} setStatus={setStatus} onSettings={() => setView('settings')} />
-      )}
+      <BottomBar status={status} setStatus={setStatus} />
 
       <Toast />
     </div>
   )
-}
-
-function getProviderDisplayName(
-  provider: InstalledProviderInfo | null | undefined,
-  manifest: ProviderManifest | null
-) {
-  return (
-    (provider?.id && PROVIDER_NAME_LABELS[provider.id]) ||
-    (manifest?.id && PROVIDER_NAME_LABELS[manifest.id]) ||
-    provider?.name ||
-    manifest?.name ||
-    ''
-  )
-}
-
-function getProviderFieldLabel(fieldKey: string, field: ProviderSchemaField) {
-  return PROVIDER_FIELD_LABELS[fieldKey] || field.title
 }
 
 function ControlPanel({
@@ -476,12 +526,10 @@ function TargetAppQuickCard({
 
 function BottomBar({
   status,
-  setStatus,
-  onSettings
+  setStatus
 }: {
   status: EngineStatus
   setStatus: (s: EngineStatus) => void
-  onSettings: () => void
 }) {
   const handleStart = useCallback(async () => {
     const settings = (await window.electron?.invoke('settings:getAll')) as AppSettings | undefined
@@ -536,49 +584,57 @@ function BottomBar({
           {t('control.start')}
         </button>
       )}
-      <button className="bottom-btn bottom-btn-settings" onClick={onSettings}>
+      <button
+        className="bottom-btn bottom-btn-settings"
+        onClick={() => window.electron?.invoke('settings:open')}
+        title="设置"
+      >
         <GearIcon />
       </button>
     </div>
   )
 }
 
+function SettingsWindow(): React.JSX.Element {
+  const [section, setSection] = useState<SettingsSection>('base')
+
+  return (
+    <div className="settings-shell">
+      <aside className="settings-sidebar">
+        <div className="settings-sidebar-brand">
+          <img src={logoUrl} alt="SightFlow" className="app-logo" />
+          <span>设置</span>
+        </div>
+        <button
+          className={`settings-nav-item ${section === 'base' ? 'active' : ''}`}
+          onClick={() => setSection('base')}
+        >
+          基础配置
+        </button>
+        <button
+          className={`settings-nav-item ${section === 'agent' ? 'active' : ''}`}
+          onClick={() => setSection('agent')}
+        >
+          智能体
+        </button>
+      </aside>
+
+      <main className="settings-main">
+        {section === 'base' ? <SettingsPanel /> : <AgentPanel />}
+      </main>
+    </div>
+  )
+}
+
 function SettingsPanel() {
-  // 设置页只关心 vision API key 和 chat provider；目标应用 + 框选已经搬到首屏
-  // ControlPanel 里的 TargetAppQuickCard，避免两处冗余配置造成困惑。
   const [visionApiKey, setVisionApiKey] = useState('')
-  const [providerManifestUrl, setProviderManifestUrl] = useState('')
-  const [installedProvider, setInstalledProvider] = useState<InstalledProviderInfo | null>(null)
-  const [installedManifest, setInstalledManifest] = useState<ProviderManifest | null>(null)
-  const [providerConfig, setProviderConfig] = useState<Record<string, any>>({})
   const [testing, setTesting] = useState(false)
-  const [installing, setInstalling] = useState(false)
-  /** true 表示当前没装自定义 provider，正在用内置 doubao 默认值 */
-  const [isBuiltinDefault, setIsBuiltinDefault] = useState(false)
 
   useEffect(() => {
     const load = async () => {
       const settings = (await window.electron?.invoke('settings:getAll')) as AppSettings | undefined
       if (settings) {
         setVisionApiKey(settings.vision?.apiKey || '')
-        setProviderManifestUrl(settings.chatProvider?.manifestUrl || '')
-        setInstalledProvider(settings.chatProvider?.installed || null)
-        setProviderConfig(settings.chatProvider?.config || {})
-      }
-
-      const providerInfo = (await window.electron?.invoke('provider:getInstalled')) as {
-        installed: InstalledProviderInfo | null
-        manifest: ProviderManifest | null
-        isBuiltinDefault?: boolean
-      }
-      setIsBuiltinDefault(Boolean(providerInfo?.isBuiltinDefault))
-      if (providerInfo?.installed) {
-        setInstalledProvider(providerInfo.installed)
-      }
-      if (providerInfo?.manifest) {
-        const manifest = providerInfo.manifest
-        setInstalledManifest(manifest)
-        setProviderConfig((prev) => applyManifestDefaults(manifest, prev))
       }
     }
 
@@ -597,62 +653,6 @@ function SettingsPanel() {
     })
     showToast(t('settings.saved'), 'success')
   }, [visionApiKey])
-
-  const handleInstallProvider = useCallback(async () => {
-    if (!providerManifestUrl.trim()) {
-      showToast(t('settings.providerManifest.required'), 'error')
-      return
-    }
-
-    setInstalling(true)
-    try {
-      const result = await window.electron?.invoke(
-        'provider:installFromUrl',
-        providerManifestUrl.trim()
-      )
-      if (!result?.success) {
-        showToast(result?.error || t('settings.providerInstall.failed'), 'error')
-        return
-      }
-
-      setIsBuiltinDefault(false)
-      setInstalledProvider(result.installed)
-      setInstalledManifest(result.manifest)
-      setProviderConfig((prev) => applyManifestDefaults(result.manifest as ProviderManifest, prev))
-      showToast(t('settings.providerInstall.success'), 'success')
-    } finally {
-      setInstalling(false)
-    }
-  }, [providerManifestUrl])
-
-  const handleSaveProvider = useCallback(async () => {
-    if (!installedManifest) {
-      showToast(t('settings.providerInstall.required'), 'error')
-      return
-    }
-
-    const required = installedManifest.configSchema.required || []
-    const missing = required.find((key) => {
-      const value = providerConfig[key]
-      return value === undefined || value === null || value === ''
-    })
-    if (missing) {
-      showToast(`${t('settings.providerField.required')}: ${missing}`, 'error')
-      return
-    }
-
-    // 内置 doubao 默认模式：保存 config（model / systemPrompt 等），但 installed 仍为 null
-    // 这样下次仍走内置 doubao + 共享视觉密钥的路径
-    await window.electron?.invoke('settings:set', {
-      chatProvider: {
-        manifestUrl: providerManifestUrl,
-        installed: isBuiltinDefault ? null : installedProvider,
-        config: providerConfig
-      }
-    })
-
-    showToast(t('settings.provider.saved'), 'success')
-  }, [installedManifest, installedProvider, providerConfig, providerManifestUrl, isBuiltinDefault])
 
   const handleTestConnection = useCallback(async () => {
     if (!visionApiKey) return
@@ -674,8 +674,15 @@ function SettingsPanel() {
   }, [visionApiKey])
 
   return (
-    <div className="slide-up">
-      <div className="card" style={{ marginBottom: 16 }}>
+    <div className="settings-page slide-up">
+      <div className="settings-page-header">
+        <div>
+          <h1>基础配置</h1>
+          <p>维护桌面端运行所需的基础参数。</p>
+        </div>
+      </div>
+
+      <div className="card base-settings-card">
         <div className="card-title">{t('settings.vision')}</div>
 
         <div className="form-group">
@@ -714,156 +721,341 @@ function SettingsPanel() {
           </button>
         </div>
       </div>
+    </div>
+  )
+}
 
+function AgentPanel(): React.JSX.Element {
+  const [catalog, setCatalog] = useState<ProviderCatalogItem[]>(BUILTIN_PROVIDER_CATALOG)
+  const [selectedId, setSelectedId] = useState(BUILTIN_PROVIDER_CATALOG[0]?.id || '')
+  const [activeId, setActiveId] = useState('doubao')
+  const [providerDrafts, setProviderDrafts] = useState<Record<string, Record<string, string>>>({})
+  const [currentSettings, setCurrentSettings] = useState<AppSettings | null>(null)
+  const [loadingCatalog, setLoadingCatalog] = useState(false)
+  const [updatingCatalog, setUpdatingCatalog] = useState(false)
+  const selectedProvider = catalog.find((provider) => provider.id === selectedId) || catalog[0]
 
-      <div className="card">
-        <div className="card-title">{t('settings.chatProvider')}</div>
+  const loadSettingsAndCatalog = useCallback(async (forceUpdate: boolean) => {
+    setLoadingCatalog(!forceUpdate)
+    setUpdatingCatalog(forceUpdate)
+    try {
+      const [settings, result] = await Promise.all([
+        window.electron?.invoke('settings:getAll') as Promise<AppSettings | undefined>,
+        window.electron?.invoke(forceUpdate ? 'providerHub:update' : 'providerHub:getCatalog') as Promise<ProviderHubResult>
+      ])
 
-        {isBuiltinDefault ? (
-          <div className="form-hint" style={{ marginBottom: 12 }}>
-            默认使用内置 doubao 提供方，与上方视觉接口密钥共享 API Key，无需重复填写。
-            如需切换到其他聊天服务，请填入 manifest 地址安装。
-          </div>
-        ) : null}
+      const nextCatalog = mergeProviderCatalog(result?.catalog?.providers || [])
+      const nextActiveId = settings?.chatProvider?.installed?.id || 'doubao'
+      setCatalog(nextCatalog)
+      setCurrentSettings(settings || null)
+      setActiveId(nextActiveId)
+      setSelectedId((current) => current || nextActiveId || BUILTIN_PROVIDER_CATALOG[0]?.id || nextCatalog[0]?.id || '')
+      setProviderDrafts((prev) => ({
+        ...prev,
+        doubao: {
+          ...getProviderDefaults(BUILTIN_PROVIDER_CATALOG[0]),
+          ...(prev.doubao || {}),
+          ...(!settings?.chatProvider?.installed ? settings?.chatProvider?.config || {} : {}),
+          apiKey: prev.doubao?.apiKey || settings?.vision?.apiKey || ''
+        },
+        [nextActiveId]: {
+          ...getProviderDefaults(nextCatalog.find((provider) => provider.id === nextActiveId)),
+          ...(prev[nextActiveId] || {}),
+          ...(settings?.chatProvider?.config || {})
+        }
+      }))
 
-        <div className="form-group">
-          <label className="form-label">{t('settings.providerManifest')}</label>
-          <input
-            className="form-input"
-            value={providerManifestUrl}
-            onChange={(e) => setProviderManifestUrl(e.target.value)}
-            placeholder={t('settings.providerManifest.placeholder')}
-            autoComplete="off"
-          />
-        </div>
+      if (result && !result.success) {
+        showToast(`智能体列表加载失败: ${result.error || ''}`, 'error')
+      } else if (forceUpdate) {
+        showToast('智能体列表已更新', 'success')
+      }
+    } finally {
+      setLoadingCatalog(false)
+      setUpdatingCatalog(false)
+    }
+  }, [])
 
-        <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
-          <button
-            className="btn btn-secondary"
-            onClick={handleInstallProvider}
-            disabled={!providerManifestUrl || installing}
-          >
-            {installing ? t('settings.providerInstall.installing') : t('settings.providerInstall')}
-          </button>
-        </div>
+  useEffect(() => {
+    void loadSettingsAndCatalog(false)
+  }, [loadSettingsAndCatalog])
 
-        {installedProvider && !isBuiltinDefault ? (
-          <div className="form-group">
-            <label className="form-label">{t('settings.providerInstalled')}</label>
-            <div className="form-hint">
-              {getProviderDisplayName(installedProvider, installedManifest)} ·{' '}
-              {installedProvider.version}
-            </div>
-            <div className="form-hint">
-              {new Date(installedProvider.installedAt).toLocaleString()}
-            </div>
-          </div>
-        ) : null}
+  const selectedValues = useMemo(
+    () => getProviderValues(providerDrafts, selectedProvider, currentSettings),
+    [currentSettings, providerDrafts, selectedProvider]
+  )
 
-        {installedManifest ? (
-          <>
-            {Object.entries(installedManifest.configSchema.properties).map(([key, field]) => (
-              <DynamicProviderField
-                key={key}
-                fieldKey={key}
-                field={field}
-                value={providerConfig[key]}
-                onChange={(value) => setProviderConfig((prev) => ({ ...prev, [key]: value }))}
-              />
-            ))}
+  const setProviderValue = useCallback(
+    (fieldKey: string, value: string) => {
+      if (!selectedProvider) return
+      setProviderDrafts((prev) => ({
+        ...prev,
+        [selectedProvider.id]: {
+          ...getProviderValues(prev, selectedProvider, currentSettings),
+          [fieldKey]: value
+        }
+      }))
+    },
+    [currentSettings, selectedProvider]
+  )
 
+  const persistProvider = useCallback(
+    async (provider: ProviderCatalogItem, values: Record<string, string>) => {
+      const missing = getMissingRequiredFields(provider, values)
+      if (missing.length > 0) {
+        showToast(`缺少必填项: ${missing.join('、')}`, 'error')
+        return false
+      }
+
+      if (provider.id === 'doubao') {
+        const { apiKey, ...providerConfig } = values
+        await window.electron?.invoke('settings:set', {
+          vision: { apiKey },
+          chatProvider: {
+            manifestUrl: '',
+            installed: null,
+            config: providerConfig
+          }
+        })
+        const settings = (await window.electron?.invoke('settings:getAll')) as AppSettings
+        await window.electron?.invoke('engine:updateConfig', settings)
+        setCurrentSettings(settings)
+        setActiveId('doubao')
+        return true
+      }
+
+      const installResult = await window.electron?.invoke('provider:installFromUrl', provider.manifestUrl)
+      if (!installResult?.success) {
+        showToast(installResult?.error || '智能体安装失败', 'error')
+        return false
+      }
+
+      await window.electron?.invoke('settings:set', {
+        chatProvider: {
+          manifestUrl: provider.manifestUrl,
+          installed: installResult.installed,
+          config: values
+        }
+      })
+      const settings = (await window.electron?.invoke('settings:getAll')) as AppSettings
+      await window.electron?.invoke('engine:updateConfig', settings)
+      setCurrentSettings(settings)
+      setActiveId(provider.id)
+      return true
+    },
+    []
+  )
+
+  const handleSaveConfig = useCallback(async () => {
+    if (!selectedProvider) return
+    const ok = await persistProvider(selectedProvider, selectedValues)
+    if (ok) showToast('智能体配置已保存', 'success')
+  }, [persistProvider, selectedProvider, selectedValues])
+
+  const handleActivate = useCallback(async () => {
+    if (!selectedProvider) return
+    const ok = await persistProvider(selectedProvider, selectedValues)
+    if (ok) showToast('已切换当前智能体', 'success')
+  }, [persistProvider, selectedProvider, selectedValues])
+
+  return (
+    <div className="settings-page slide-up">
+      <div className="settings-page-header">
+        <div>
+          <div className="settings-title-row">
+            <h1>智能体</h1>
             <button
-              className="btn btn-primary"
-              onClick={handleSaveProvider}
-              style={{ width: '100%' }}
+              className="icon-action refresh-action"
+              onClick={() => loadSettingsAndCatalog(true)}
+              disabled={updatingCatalog}
+              title={updatingCatalog ? '更新中...' : '更新列表'}
+              aria-label={updatingCatalog ? '更新中' : '更新智能体列表'}
             >
-              {t('settings.provider.save')}
+              <span className={updatingCatalog ? 'refresh-icon spinning' : 'refresh-icon'}>
+                <RefreshIcon />
+              </span>
             </button>
-          </>
-        ) : (
-          <div className="form-hint">{t('settings.providerInstall.required')}</div>
-        )}
+            {updatingCatalog ? <span className="inline-status">更新中...</span> : null}
+          </div>
+          <p>选择负责聊天分析和内容生成的智能体，并维护各自配置。</p>
+        </div>
+      </div>
+
+      {loadingCatalog ? (
+        <div className="provider-hub-meta">
+          <span className="spinner" />
+          正在加载远端智能体列表
+        </div>
+      ) : null}
+
+      <div className="provider-layout">
+        <div className="provider-list">
+          {!loadingCatalog && catalog.length === 0 ? (
+            <div className="provider-empty">暂无可用智能体，请点击更新列表。</div>
+          ) : null}
+          {catalog.map((provider) => {
+            const description = provider.description || provider.name
+            const active = activeId === provider.id
+
+            return (
+              <button
+                key={provider.id}
+                className={`provider-card ${selectedId === provider.id ? 'selected' : ''}`}
+                onClick={() => setSelectedId(provider.id)}
+              >
+                <div className="provider-card-top">
+                  <span className="provider-name">{provider.name}</span>
+                  {active ? (
+                    <span className="provider-status" title="当前启用" aria-label="当前启用">
+                      <span className="provider-status-dot" />
+                      启用中
+                    </span>
+                  ) : null}
+                </div>
+                <div className="provider-desc" title={description}>
+                  {description}
+                </div>
+                <div className="provider-version">v{provider.version}</div>
+              </button>
+            )
+          })}
+        </div>
+
+        <div className="card provider-config-card">
+          {selectedProvider ? (
+            <>
+              <div className="provider-config-header">
+                <div>
+                  <div className="card-title">智能体配置</div>
+                  <h2>{selectedProvider.name}</h2>
+                </div>
+                <span className="provider-version">v{selectedProvider.version}</span>
+              </div>
+
+              {selectedProvider.configSchema.fields.map((field) => (
+                <ProviderFieldInput
+                  key={field.key}
+                  field={field}
+                  value={selectedValues[field.key] || ''}
+                  onChange={(value) => setProviderValue(field.key, value)}
+                />
+              ))}
+
+              <div className="provider-actions">
+                <button className="btn btn-secondary" onClick={handleSaveConfig}>
+                  保存配置
+                </button>
+                <button className="btn btn-primary" onClick={handleActivate}>
+                  启用此智能体
+                </button>
+              </div>
+            </>
+          ) : (
+            <div className="provider-empty">没有选中的智能体。</div>
+          )}
+        </div>
       </div>
     </div>
   )
 }
 
-function DynamicProviderField({
-  fieldKey,
+function ProviderFieldInput({
   field,
   value,
   onChange
 }: {
-  fieldKey: string
-  field: ProviderSchemaField
-  value: any
-  onChange: (value: any) => void
-}) {
-  const label = getProviderFieldLabel(fieldKey, field)
-  const normalizedValue =
-    value !== undefined
-      ? value
-      : field.default !== undefined
-        ? field.default
-        : field.type === 'boolean'
-          ? false
-          : ''
-
+  field: ProviderConfigField
+  value: string
+  onChange: (value: string) => void
+}): React.JSX.Element {
   return (
     <div className="form-group">
-      <label className="form-label">{label}</label>
-      {field.type === 'select' ? (
+      <label className="form-label">
+        {field.label}
+        {field.required ? <span className="required-mark"> *</span> : null}
+      </label>
+      {field.type === 'textarea' ? (
+        <textarea
+          className="form-input"
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          placeholder={field.placeholder}
+          rows={4}
+          readOnly={field.readonly}
+        />
+      ) : field.type === 'select' ? (
         <select
           className="form-input"
-          value={String(normalizedValue)}
-          onChange={(e) => onChange(e.target.value)}
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          disabled={field.readonly}
         >
-          {(field.enum || []).map((option) => (
-            <option key={option} value={option}>
-              {option}
+          {(field.options || []).map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
             </option>
           ))}
         </select>
-      ) : field.type === 'boolean' ? (
-        <label style={{ display: 'flex', alignItems: 'center', gap: 8, color: '#cbd5e1' }}>
-          <input
-            type="checkbox"
-            checked={Boolean(normalizedValue)}
-            onChange={(e) => onChange(e.target.checked)}
-          />
-          {label}
-        </label>
-      ) : fieldKey === 'systemPrompt' ? (
-        <textarea
-          className="form-input"
-          rows={4}
-          value={String(normalizedValue)}
-          onChange={(e) => onChange(e.target.value)}
-        />
       ) : (
         <input
           className="form-input"
-          type={field.type === 'password' ? 'password' : 'text'}
-          value={String(normalizedValue)}
-          onChange={(e) => onChange(e.target.value)}
+          type={field.type === 'password' ? 'password' : field.type === 'url' ? 'url' : 'text'}
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          placeholder={field.placeholder}
           autoComplete="off"
+          readOnly={field.readonly}
         />
       )}
+      {field.hint ? <div className="form-hint">{field.hint}</div> : null}
     </div>
   )
 }
 
-function applyManifestDefaults(
-  manifest: ProviderManifest,
-  current: Record<string, any>
-): Record<string, any> {
-  const next = { ...current }
-  for (const [key, field] of Object.entries(manifest.configSchema.properties || {})) {
-    if (next[key] === undefined && field.default !== undefined) {
-      next[key] = field.default
+function mergeProviderCatalog(remoteProviders: ProviderCatalogItem[]): ProviderCatalogItem[] {
+  const remoteOnly = remoteProviders.filter(
+    (provider) => !BUILTIN_PROVIDER_CATALOG.some((builtin) => builtin.id === provider.id)
+  )
+  return [...BUILTIN_PROVIDER_CATALOG, ...remoteOnly]
+}
+
+function getProviderDefaults(provider: ProviderCatalogItem | undefined): Record<string, string> {
+  if (!provider) return {}
+  return provider.configSchema.fields.reduce<Record<string, string>>((acc, field) => {
+    acc[field.key] = field.defaultValue || ''
+    return acc
+  }, {})
+}
+
+function getProviderValues(
+  drafts: Record<string, Record<string, string>>,
+  provider: ProviderCatalogItem | undefined,
+  settings: AppSettings | null
+): Record<string, string> {
+  if (!provider) return {}
+  const defaults = getProviderDefaults(provider)
+  if (provider.id === 'doubao') {
+    return {
+      ...defaults,
+      ...(settings?.chatProvider.installed ? {} : settings?.chatProvider.config || {}),
+      apiKey: drafts.doubao?.apiKey || settings?.vision.apiKey || '',
+      ...(drafts.doubao || {})
     }
   }
-  return next
+  return {
+    ...defaults,
+    ...(settings?.chatProvider.installed?.id === provider.id ? settings.chatProvider.config : {}),
+    ...(drafts[provider.id] || {})
+  }
+}
+
+function getMissingRequiredFields(
+  provider: ProviderCatalogItem,
+  values: Record<string, string>
+): string[] {
+  return provider.configSchema.fields
+    .filter((field) => field.required && !values[field.key]?.trim())
+    .map((field) => field.label)
 }
 
 let _showToast: ((msg: string, type: 'success' | 'error') => void) | null = null
