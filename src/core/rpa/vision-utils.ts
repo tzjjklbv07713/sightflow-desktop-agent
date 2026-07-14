@@ -1,69 +1,23 @@
-// src/core/rpa/vision-utils.ts
+﻿// src/core/rpa/vision-utils.ts
 // VLM 视觉检测工具
 //
-// 用 AIClient.detectVision() 调豆包 VLM，解析返回的 bbox/point 坐标
+// 用视觉客户端 detectVision() 调 VLM，解析返回的 bbox/point 坐标
 // 检测微信/企微布局（聊天入口、联系人列表、输入框等）
 
-import { AIClient } from '../ai-client'
-import { AppType, ScreenRect } from './types'
+import { type VisionDetectionClient } from '../vision-client'
+import { AppType } from './types'
 import { captureWechatWindow } from './screenshot-utils'
 import { getWindowInfo, getWindowInfoSync } from './window-utils'
+import { BBox, clearLayoutCache, getLayoutCache, setLayoutCache, type LayoutAreaItem, type LayoutCache } from './layout-cache'
+
+export type { BBox, LayoutAreaItem, LayoutCache }
+export { clearLayoutCache, getLayoutCache, setLayoutCache }
 
 const IS_WINDOWS = process.platform === 'win32'
+const LAYOUT_DETECT_TIMEOUT_MS = 12_000
 
 // ── 类型定义 ──
 
-export type BBox = [number, number, number, number] // [x1, y1, x2, y2] 归一化 0-1000
-
-export interface LayoutAreaItem {
-  bbox?: BBox
-  rect?: ScreenRect
-  coordinates: [number, number] // 屏幕绝对坐标
-  source?: 'vlm' | 'box-select' | 'derived'
-}
-
-export interface LayoutCache {
-  // ── 未读检测区域（detectUnreadArea） ──
-  chatEntranceArea: LayoutAreaItem | null // 聊天入口按钮（粗检测红点）
-  firstContact: LayoutAreaItem | null // 联系人列表第一行（细检测红点）
-
-  // ── 主布局区域（detectWechatLayout） ──
-  searchInputBox: LayoutAreaItem | null // 搜索输入框
-  headerArea: LayoutAreaItem | null // 对话窗口 header
-  chatMainArea: LayoutAreaItem | null // 聊天记录区（diff 检测用）
-
-  // ── 输入框区域（从 chatMainArea 反推） ──
-  messageInputArea: LayoutAreaItem | null // 文字输入框（chatMainArea 底边 → 窗口底边）
-
-  timestamp: number
-  appType: AppType
-}
-
-// ── 布局缓存（内存） ──
-
-const layoutCacheMemory = new Map<AppType, LayoutCache>()
-
-export function getLayoutCache(appType: AppType): LayoutCache | null {
-  return layoutCacheMemory.get(appType) || null
-}
-
-export function setLayoutCache(appType: AppType, cache: LayoutCache): void {
-  layoutCacheMemory.set(appType, cache)
-}
-
-export function clearLayoutCache(appType: AppType): void {
-  layoutCacheMemory.delete(appType)
-}
-
-// ── BBox / Point 解析 ──
-
-/**
- * 从 VLM 返回文本中解析所有 <bbox> 标签
- * 支持格式:
- *   - <bbox>x1,y1,x2,y2</bbox>  (逗号分隔)
- *   - <bbox>x1 y1 x2 y2</bbox>  (空格分隔)
- * 坐标为归一化 0-1000
- */
 export function parseBBoxes(text: string): BBox[] {
   if (!text) return []
   const bboxes: BBox[] = []
@@ -97,7 +51,174 @@ export function parseBBoxes(text: string): BBox[] {
     }
   }
 
+  if (bboxes.length === 0) {
+    const seen = new Set<string>()
+    const tupleRegex =
+      /\[\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*\]/g
+
+    while ((match = tupleRegex.exec(text)) !== null) {
+      const candidate: BBox = [
+        Math.round(Number(match[1])),
+        Math.round(Number(match[2])),
+        Math.round(Number(match[3])),
+        Math.round(Number(match[4]))
+      ]
+      if (!isValidBBox(candidate)) continue
+      const key = candidate.join(',')
+      if (seen.has(key)) continue
+      seen.add(key)
+      bboxes.push(candidate)
+    }
+  }
+
   return bboxes
+}
+
+function isValidBBox(bbox: BBox): boolean {
+  const [x1, y1, x2, y2] = bbox
+  return (
+    [x1, y1, x2, y2].every((value) => Number.isFinite(value) && value >= 0 && value <= 1000) &&
+    x2 > x1 &&
+    y2 > y1
+  )
+}
+
+function createFallbackWechatLayout(appType: AppType): {
+  searchInputBox: BBox
+  headerArea: BBox
+  chatMainArea: BBox
+} {
+  if (appType === 'wework') {
+    return {
+      searchInputBox: [61, 16, 214, 52],
+      headerArea: [223, 0, 735, 63],
+      chatMainArea: [223, 64, 735, 895]
+    }
+  }
+
+  return {
+    searchInputBox: [63, 15, 221, 52],
+    headerArea: [224, 0, 735, 63],
+    chatMainArea: [224, 64, 735, 895]
+  }
+}
+
+function createFallbackUnreadArea(appType: AppType): {
+  chatEntranceArea: BBox
+  firstContact: BBox
+} {
+  if (appType === 'wework') {
+    return {
+      // 企业微信左侧导航栏“消息”按钮，包含右上角红色数字角标。
+      chatEntranceArea: [5, 58, 58, 102],
+      // 中间消息列表第一条会话的头像区域，红点通常在头像右上角。
+      firstContact: [68, 68, 125, 115]
+    }
+  }
+
+  return {
+    chatEntranceArea: [5, 58, 58, 102],
+    firstContact: [68, 68, 125, 115]
+  }
+}
+
+function buildFallbackUnreadResult(
+  appType: AppType,
+  bounds: { x: number; y: number; width: number; height: number },
+  scaleFactor: number,
+  error?: string
+): {
+  success: boolean
+  chatEntranceArea: { bbox: BBox; coordinates: [number, number] }
+  firstContact: { bbox: BBox; coordinates: [number, number] }
+  error?: string
+} {
+  const fallbackUnreadArea = createFallbackUnreadArea(appType)
+  const chatEntranceArea = {
+    bbox: fallbackUnreadArea.chatEntranceArea,
+    coordinates: bboxToScreenCoords(fallbackUnreadArea.chatEntranceArea, bounds, scaleFactor)
+  }
+  const firstContact = {
+    bbox: fallbackUnreadArea.firstContact,
+    coordinates: bboxToScreenCoords(fallbackUnreadArea.firstContact, bounds, scaleFactor)
+  }
+
+  const existingCache = getLayoutCache(appType)
+  setLayoutCache(appType, {
+    ...(existingCache || {
+      searchInputBox: null,
+      headerArea: null,
+      chatMainArea: null,
+      messageInputArea: null
+    }),
+    chatEntranceArea: { ...chatEntranceArea, source: 'derived' },
+    firstContact: { ...firstContact, source: 'derived' },
+    timestamp: Date.now(),
+    appType
+  } as LayoutCache)
+
+  console.warn('[VisionUtils] 使用默认未读区域兜底', {
+    appType,
+    error,
+    chatEntranceArea: chatEntranceArea.coordinates,
+    firstContact: firstContact.coordinates
+  })
+
+  return { success: true, chatEntranceArea, firstContact, error }
+}
+
+function buildFallbackLayoutResult(
+  appType: AppType,
+  bounds: { x: number; y: number; width: number; height: number },
+  scaleFactor: number,
+  error?: string
+): {
+  success: boolean
+  searchInputBox: LayoutAreaItem
+  headerArea: LayoutAreaItem
+  chatMainArea: LayoutAreaItem
+  error?: string
+} {
+  const fallbackLayout = createFallbackWechatLayout(appType)
+  const searchInputBox: LayoutAreaItem = {
+    bbox: fallbackLayout.searchInputBox,
+    coordinates: bboxToScreenCoords(fallbackLayout.searchInputBox, bounds, scaleFactor),
+    source: 'derived'
+  }
+  const headerArea: LayoutAreaItem = {
+    bbox: fallbackLayout.headerArea,
+    coordinates: bboxToScreenCoords(fallbackLayout.headerArea, bounds, scaleFactor),
+    source: 'derived'
+  }
+  const chatMainArea: LayoutAreaItem = {
+    bbox: fallbackLayout.chatMainArea,
+    coordinates: bboxToScreenCoords(fallbackLayout.chatMainArea, bounds, scaleFactor),
+    source: 'derived'
+  }
+
+  const existingCache = getLayoutCache(appType)
+  setLayoutCache(appType, {
+    ...(existingCache || {
+      chatEntranceArea: null,
+      firstContact: null,
+      messageInputArea: null
+    }),
+    searchInputBox,
+    headerArea,
+    chatMainArea,
+    timestamp: Date.now(),
+    appType
+  } as LayoutCache)
+
+  console.warn('[VisionUtils] 使用默认主布局兜底', {
+    appType,
+    error,
+    searchInputBox: searchInputBox.coordinates,
+    headerArea: headerArea.coordinates,
+    chatMainArea: chatMainArea.coordinates
+  })
+
+  return { success: true, searchInputBox, headerArea, chatMainArea, error }
 }
 
 /**
@@ -233,7 +354,7 @@ const UNREAD_AREA_PROMPTS: Record<'wechat' | 'wework', { prompt: string; targets
  * 结果写入 LayoutCache
  */
 export async function detectUnreadArea(
-  aiClient: AIClient,
+  aiClient: VisionDetectionClient,
   appType: AppType
 ): Promise<{
   success: boolean
@@ -260,26 +381,56 @@ export async function detectUnreadArea(
 
     // 4. 调 VLM
     console.log('[VisionUtils] 调用 VLM 检测未读区域...')
-    const vlmResult = await aiClient.detectVision(config.prompt, screenshotResult.screenshotBase64)
+    let vlmResult = ''
+    try {
+      vlmResult = await aiClient.detectVision(
+        config.prompt,
+        screenshotResult.screenshotBase64,
+        LAYOUT_DETECT_TIMEOUT_MS
+      )
+    } catch (error: any) {
+      return buildFallbackUnreadResult(
+        appType,
+        windowInfo.bounds,
+        windowInfo.scaleFactor,
+        error?.message || String(error)
+      )
+    }
     console.log('[VisionUtils] VLM 返回:', vlmResult.slice(0, 300))
 
-    // 5. 解析 bbox
+    // 5. 解析 bbox。VLM 偶尔不按格式返回时，用稳定的三栏布局默认区域兜底。
     const bboxes = parseBBoxes(vlmResult)
+    const fallbackUnreadArea = createFallbackUnreadArea(appType)
+    const unreadBBoxes = {
+      chatEntranceArea: bboxes[0] || fallbackUnreadArea.chatEntranceArea,
+      firstContact: bboxes[1] || fallbackUnreadArea.firstContact
+    }
+
     if (bboxes.length === 0) {
-      return { success: false, error: '未检测到任何区域' }
+      console.warn('[VisionUtils] 未读区域检测未返回 bbox，使用默认未读区域兜底', {
+        appType,
+        fallbackUnreadArea
+      })
     }
 
     const { bounds, scaleFactor } = windowInfo
 
-    // 6. chatEntranceArea — 第一个 bbox
-    const chatEntranceCoords = bboxToScreenCoords(bboxes[0], bounds, scaleFactor)
-    const chatEntranceArea = { bbox: bboxes[0], coordinates: chatEntranceCoords }
+    // 6. chatEntranceArea — 左侧消息入口 / 红色数字角标区域
+    const chatEntranceArea: {
+      bbox: BBox
+      coordinates: [number, number]
+      source: 'vlm' | 'derived'
+    } = {
+      bbox: unreadBBoxes.chatEntranceArea,
+      coordinates: bboxToScreenCoords(unreadBBoxes.chatEntranceArea, bounds, scaleFactor),
+      source: bboxes[0] ? 'vlm' : 'derived'
+    }
 
-    // 7. firstContact — 第二个 bbox（如果有）
-    let firstContact: { bbox: BBox; coordinates: [number, number] } | null = null
-    if (bboxes[1]) {
-      const firstContactCoords = bboxToScreenCoords(bboxes[1], bounds, scaleFactor)
-      firstContact = { bbox: bboxes[1], coordinates: firstContactCoords }
+    // 7. firstContact — 消息列表第一行头像 / 未读红点区域
+    const firstContact: { bbox: BBox; coordinates: [number, number]; source: 'vlm' | 'derived' } = {
+      bbox: unreadBBoxes.firstContact,
+      coordinates: bboxToScreenCoords(unreadBBoxes.firstContact, bounds, scaleFactor),
+      source: bboxes[1] ? 'vlm' : 'derived'
     }
 
     // 8. 更新缓存
@@ -299,10 +450,12 @@ export async function detectUnreadArea(
 
     console.log('[VisionUtils] 未读区域检测完成', {
       chatEntranceArea: chatEntranceArea.coordinates,
-      firstContact: firstContact?.coordinates
+      chatEntranceSource: chatEntranceArea.source,
+      firstContact: firstContact.coordinates,
+      firstContactSource: firstContact.source
     })
 
-    return { success: true, chatEntranceArea, firstContact: firstContact || undefined }
+    return { success: true, chatEntranceArea, firstContact }
   } catch (error: any) {
     console.error('[VisionUtils] 检测失败:', error)
     return { success: false, error: error?.message || String(error) }
@@ -313,7 +466,7 @@ export async function detectUnreadArea(
  * 获取未读区域（优先用缓存，没有则调 VLM 检测）
  */
 export async function getUnreadArea(
-  aiClient: AIClient,
+  aiClient: VisionDetectionClient,
   appType: AppType
 ): Promise<{
   chatEntranceArea: { bbox: BBox; coordinates: [number, number] } | null
@@ -324,7 +477,10 @@ export async function getUnreadArea(
   // 有完整 VLM bbox 缓存直接返回。box-select 写入的 rect-only 区域不能用于红点 bbox 检测。
   if (cache?.chatEntranceArea?.bbox && cache?.firstContact?.bbox) {
     return {
-      chatEntranceArea: { bbox: cache.chatEntranceArea.bbox, coordinates: cache.chatEntranceArea.coordinates },
+      chatEntranceArea: {
+        bbox: cache.chatEntranceArea.bbox,
+        coordinates: cache.chatEntranceArea.coordinates
+      },
       firstContact: { bbox: cache.firstContact.bbox, coordinates: cache.firstContact.coordinates }
     }
   }
@@ -451,7 +607,7 @@ const LAYOUT_DETECT_PROMPTS: Record<'wechat' | 'wework', { prompt: string; targe
  * 结果写入 LayoutCache
  */
 export async function detectWechatLayout(
-  aiClient: AIClient,
+  aiClient: VisionDetectionClient,
   appType: AppType
 ): Promise<{
   success: boolean
@@ -481,29 +637,58 @@ export async function detectWechatLayout(
 
     // 4. 调 VLM
     console.log('[VisionUtils] 调用 VLM 检测布局...')
-    const vlmResult = await aiClient.detectVision(config.prompt, screenshotResult.screenshotBase64)
+    let vlmResult = ''
+    try {
+      vlmResult = await aiClient.detectVision(
+        config.prompt,
+        screenshotResult.screenshotBase64,
+        LAYOUT_DETECT_TIMEOUT_MS
+      )
+    } catch (error: any) {
+      return buildFallbackLayoutResult(
+        appType,
+        windowInfo.bounds,
+        windowInfo.scaleFactor,
+        error?.message || String(error)
+      )
+    }
     console.log('[VisionUtils] VLM 布局检测返回:', vlmResult.slice(0, 300))
 
     // 5. 解析 bbox
     const bboxes = parseBBoxes(vlmResult)
+    const fallbackLayout = createFallbackWechatLayout(appType)
+    const layoutBBoxes = {
+      searchInputBox: bboxes[0] || fallbackLayout.searchInputBox,
+      headerArea: bboxes[1] || fallbackLayout.headerArea,
+      chatMainArea: bboxes[2] || fallbackLayout.chatMainArea
+    }
     if (bboxes.length === 0) {
-      return { success: false, error: '布局检测未返回任何区域' }
+      console.warn('[VisionUtils] 布局检测未返回 bbox，使用默认布局兜底', {
+        appType,
+        fallbackLayout
+      })
     }
 
     const { bounds, scaleFactor } = windowInfo
 
     // 6. 转换坐标
-    const searchInputBox: LayoutAreaItem | undefined = bboxes[0]
-      ? { bbox: bboxes[0], coordinates: bboxToScreenCoords(bboxes[0], bounds, scaleFactor) }
-      : undefined
+    const searchInputBox: LayoutAreaItem = {
+      bbox: layoutBBoxes.searchInputBox,
+      coordinates: bboxToScreenCoords(layoutBBoxes.searchInputBox, bounds, scaleFactor),
+      source: bboxes[0] ? 'vlm' : 'derived'
+    }
 
-    const headerArea: LayoutAreaItem | undefined = bboxes[1]
-      ? { bbox: bboxes[1], coordinates: bboxToScreenCoords(bboxes[1], bounds, scaleFactor) }
-      : undefined
+    const headerArea: LayoutAreaItem = {
+      bbox: layoutBBoxes.headerArea,
+      coordinates: bboxToScreenCoords(layoutBBoxes.headerArea, bounds, scaleFactor),
+      source: bboxes[1] ? 'vlm' : 'derived'
+    }
 
-    const chatMainArea: LayoutAreaItem | undefined = bboxes[2]
-      ? { bbox: bboxes[2], coordinates: bboxToScreenCoords(bboxes[2], bounds, scaleFactor) }
-      : undefined
+    const chatMainArea: LayoutAreaItem = {
+      bbox: layoutBBoxes.chatMainArea,
+      coordinates: bboxToScreenCoords(layoutBBoxes.chatMainArea, bounds, scaleFactor),
+      source: bboxes[2] ? 'vlm' : 'derived'
+    }
 
     // 7. 更新缓存
     const existingCache = getLayoutCache(appType)
@@ -513,9 +698,9 @@ export async function detectWechatLayout(
         firstContact: null,
         messageInputArea: null
       }),
-      searchInputBox: searchInputBox || null,
-      headerArea: headerArea || null,
-      chatMainArea: chatMainArea || null,
+      searchInputBox,
+      headerArea,
+      chatMainArea,
       timestamp: Date.now(),
       appType
     } as LayoutCache)
@@ -532,3 +717,4 @@ export async function detectWechatLayout(
     return { success: false, error: error?.message || String(error) }
   }
 }
+

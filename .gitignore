@@ -21,3 +21,20 @@ out
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# Ad-hoc dev/test scratch files (debug scripts, scratch logs, capture PNGs)
+tmp-*
+out-test/
+build/
+
+# Codex/WorkBuddy temporary runtime artifacts
+.codex-runtime/
+.codex-scratch/
+
+# WorkBuddy workspace memory (local only)
+.workbuddy/
+
+# Temp scratch files in scripts/
+scripts/.tmp-*
+scripts/*-out.txt
+scripts/*-probe-out.txt

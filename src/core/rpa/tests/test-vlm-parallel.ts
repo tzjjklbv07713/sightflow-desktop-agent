@@ -1,14 +1,17 @@
-import { AIClient } from '../../ai-client'
+import { VisionModelClient } from '../../vision-client'
 import { detectUnreadArea } from '../vision-utils'
 import { AppType } from '../types'
 
-export async function runVlmParallelTest(apiKey: string, appType: AppType = 'wechat') {
-  const aiClient = new AIClient({ apiKey })
+export async function runVlmParallelTest(
+  config: { apiKey: string; model?: string; baseURL?: string },
+  appType: AppType = 'wechat'
+) {
+  const visionClient = new VisionModelClient(config)
 
   console.log('[Test] 单独调 detectUnreadArea，计时开始...')
   const t = Date.now()
   try {
-    const result = await detectUnreadArea(aiClient, appType)
+    const result = await detectUnreadArea(visionClient, appType)
     const elapsed = ((Date.now() - t) / 1000).toFixed(1)
     console.log(`[Test] detectUnreadArea ${result.success ? '✓' : '✗'} (${elapsed}s)`)
     if (!result.success) console.log('[Test] error:', result.error)

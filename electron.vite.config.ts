@@ -15,6 +15,11 @@ export default defineConfig({
   },
   preload: {},
   renderer: {
+    server: {
+      host: '127.0.0.1',
+      port: 5190,
+      strictPort: true
+    },
     resolve: {
       alias: {
         '@renderer': resolve('src/renderer/src')

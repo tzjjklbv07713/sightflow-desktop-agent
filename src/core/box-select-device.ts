@@ -1,19 +1,6 @@
-// src/core/box-select-device.ts
-// BoxSelectDevice — DesktopDevice 的"用户手动框选区域 + 单会话模式"实现。
-//
-// 与 RPADevice 的关系：两者都实现同一 DesktopDevice 接口、由 GenericChannelSession 统一驱动。
-// 区别在于"如何知道 chatMain / inputBox 在屏幕上哪里"：
-//   - RPADevice  : 用 VLM 在线推理 wechat / wework 的布局，并主动扫红点切换会话。
-//   - BoxSelectDevice: 用户在框选向导里手动画 3 个矩形（contactList / chatMain / inputBox）。
-//     运行时只对当前已经打开的对话窗口做"chatMain pixel diff → 输入框回复"，
-//     不去点 contactList 切换会话。适用于飞书 / 钉钉 / Slack / Telegram 等
-//     非 wechat 场景，以及 wechat VLM 检测失败时的兜底策略。
-//
-// 坐标系统一约定：BoxRegions 里的矩形都是逻辑像素的绝对屏幕坐标，与 captureScreenRegion、
-// humanLikeMove、screen.getDisplayMatching 一致；裁剪到物理像素的换算由 captureScreenRegion 内部处理。
-
 import { DesktopDevice } from './device'
-import { AppType, BoxRegions, ScreenRect } from './rpa/types'
+import { AppType, BoxRegions, ScreenRect, isWechatLike } from './rpa/types'
+import { ReplyOutputConfig, ReplySendOptions } from './rpa/input-utils'
 import {
   BBox,
   clearLayoutCache,
@@ -21,14 +8,21 @@ import {
   LayoutCache,
   setLayoutCache
 } from './rpa/vision-utils'
-import { captureChatMainArea } from './rpa/screenshot-utils'
+import { captureChatMainArea, dataUrlToNativeImage } from './rpa/screenshot-utils'
+import {
+  inspectLatestMessageFromScreenshot,
+  LatestMessageInspection
+} from './rpa/latest-message-inspector'
 import {
   activeUnreadByClickAction,
   clickUnreadContactAction,
   defaultClickPolicy,
+  setReplyOutputConfig,
   sendReplyByCoordsAction
 } from './rpa/input-utils'
 import { comparePngBuffers } from './rpa/image-compare'
+import { AutomationSafetyResult, SAFE_AUTOMATION_RESULT } from './automation-safety'
+import { probeHybridPerception } from './perception/hybrid-perception'
 
 function rectCenter(rect: ScreenRect): [number, number] {
   return [rect.x + rect.width / 2, rect.y + rect.height / 2]
@@ -47,9 +41,14 @@ export class BoxSelectDevice implements DesktopDevice {
     this.appType = appType
   }
 
-  // BoxSelectDevice 不需要视觉密钥；保留 no-op 以满足接口（engine:updateConfig 会调）。
-  setApiKey(apiKey: string): void {
+  setApiKey(apiKey: string, model?: string, baseURL?: string): void {
     void apiKey
+    void model
+    void baseURL
+  }
+
+  setReplyOutputConfig(config: ReplyOutputConfig): void {
+    setReplyOutputConfig(config)
   }
 
   setRegions(regions: BoxRegions | null): void {
@@ -60,20 +59,16 @@ export class BoxSelectDevice implements DesktopDevice {
     return this.regions
   }
 
-  // ── 生命周期 ──
   onSessionStop(): void {
     clearLayoutCache(this.appType)
     this.chatBaseline = null
   }
-
-  // ── 感知层 ──
 
   async measureLayout(): Promise<{ success: boolean; error?: string }> {
     if (!this.regions) {
       return { success: false, error: '尚未保存框选区域，请先完成框选向导' }
     }
 
-    // 保持 box-select 既有三框模型；measureLayout 只负责把这些测量结果写入 LayoutCache。
     const required: Array<[string, ScreenRect | null | undefined]> = [
       ['contactList', this.regions.contactList],
       ['chatMain', this.regions.chatMain],
@@ -109,8 +104,6 @@ export class BoxSelectDevice implements DesktopDevice {
     return { success: true }
   }
 
-  // 把 chatMain 区域截图作为"会话上下文"返回给 provider VLM 分析。
-  // 比起 RPADevice 整窗截图，这里更聚焦于聊天内容，省 token 且与目标 app 无关。
   async screenshot(): Promise<string> {
     const image = await captureChatMainArea(this.appType)
     if (!image) {
@@ -119,14 +112,56 @@ export class BoxSelectDevice implements DesktopDevice {
     return image.toDataURL()
   }
 
-  // 单会话模式：BoxSelectDevice 只关心"当前已经打开的对话窗口里有没有新内容"，
-  // 不去扫 contactList 红点 / 点击切换会话。原因：第三方 IM（飞书 / 钉钉 / Slack 等）
-  // 联系人列表布局差异太大，「激活联系人 → 回到输入框」的来回点击经常打偏，
-  // 失败的代价很大（点错地方、误发到别的会话）。
-  //
-  // hasUnreadMessage 永远返回 false，让 GenericChannelSession 退化到 wait_retry
-  // 循环，下一轮 check_unread 时只走 hasChatAreaChanged（chatMain pixel diff）。
-  // 用户只要把目标对话窗口保持打开，新消息进来 → diff 命中 → 触发 observe_chat。
+  async inspectLatestMessage(screenshot?: string): Promise<LatestMessageInspection> {
+    try {
+      const screenshotBase64 = screenshot || (await this.screenshot())
+      return await inspectLatestMessageFromScreenshot(screenshotBase64, this.appType)
+    } catch (error: unknown) {
+      return {
+        detected: false,
+        latestFromSelf: false,
+        confidence: 0,
+        error: error instanceof Error ? error.message : String(error)
+      }
+    }
+  }
+
+  async checkAutomationSafety(): Promise<AutomationSafetyResult> {
+    const inputArea = getInputAreaFromCache(this.appType)
+    if (!inputArea) {
+      return {
+        safe: false,
+        reason: 'input_unavailable',
+        message: '尚未测量输入框区域'
+      }
+    }
+
+    if (!isWechatLike(this.appType)) return SAFE_AUTOMATION_RESULT
+
+    const perception = await probeHybridPerception(this.appType, { includeScreenshot: false })
+    console.log('[BoxSelectDevice] 混合感知能力', {
+      source: perception.source,
+      windowFound: perception.capabilities.windowFound,
+      windowUsable: perception.capabilities.windowUsable,
+      textReadable: perception.capabilities.textReadable,
+      inputDetectable: perception.capabilities.inputDetectable,
+      visionRequired: perception.capabilities.visionRequired,
+      title: perception.title,
+      processName: perception.processName,
+      reason: perception.reason
+    })
+
+    if (!perception.capabilities.windowFound || !perception.capabilities.windowUsable) {
+      return {
+        safe: false,
+        reason: 'window_missing',
+        message: perception.message || '目标窗口丢失、最小化，或无法获取窗口边界'
+      }
+    }
+
+    return SAFE_AUTOMATION_RESULT
+  }
+
   async hasUnreadMessage(): Promise<{
     hasUnread: boolean
     chatEntranceArea?: { bbox: BBox; coordinates: [number, number] }
@@ -134,7 +169,6 @@ export class BoxSelectDevice implements DesktopDevice {
     return { hasUnread: false }
   }
 
-  // 单会话模式下不会被调用到（hasUnreadMessage 已返回 false）；保留实现以满足接口。
   async isChatContactUnread(): Promise<{
     isUnread: boolean
     firstContactCoords?: [number, number]
@@ -142,15 +176,12 @@ export class BoxSelectDevice implements DesktopDevice {
     return { isUnread: false }
   }
 
-  // box-select 没有 VLM 缓存可清；no-op。
   clearUnreadCache(): void {
     // intentionally empty
   }
 
-  // ── chatMainArea Diff ──
-
-  async setChatBaseline(): Promise<boolean> {
-    const image = await captureChatMainArea(this.appType)
+  async setChatBaseline(screenshot?: string): Promise<boolean> {
+    const image = screenshot ? dataUrlToNativeImage(screenshot) : await captureChatMainArea(this.appType)
     if (!image) {
       console.warn('[BoxSelectDevice] baseline 设置失败: chatMain 截图为空')
       return false
@@ -159,37 +190,45 @@ export class BoxSelectDevice implements DesktopDevice {
     return true
   }
 
-  async hasChatAreaChanged(): Promise<{ hasDiff: boolean; hasBaseline: boolean }> {
+  async hasChatAreaChanged(screenshot?: string): Promise<{
+    hasDiff: boolean
+    hasBaseline: boolean
+    diffPercentage?: number
+    identical?: boolean
+    error?: string
+  }> {
     if (!this.chatBaseline) return { hasDiff: false, hasBaseline: false }
 
-    const image = await captureChatMainArea(this.appType)
+    const image = screenshot ? dataUrlToNativeImage(screenshot) : await captureChatMainArea(this.appType)
     if (!image) {
-      return { hasDiff: false, hasBaseline: true }
+      return { hasDiff: false, hasBaseline: true, error: '截图失败' }
     }
     const current = image.toPNG()
     const cmp = comparePngBuffers(this.chatBaseline, current, {
       threshold: 0.1,
-      changeThreshold: 0.5
+      changeThreshold: 0.15
     })
-    return { hasDiff: cmp.hasChanged && !cmp.identical, hasBaseline: true }
+    return {
+      hasDiff: cmp.hasChanged && !cmp.identical,
+      hasBaseline: true,
+      diffPercentage: cmp.diffPercentage,
+      identical: cmp.identical
+    }
   }
 
   clearChatBaseline(): void {
     this.chatBaseline = null
   }
 
-  // ── 动作层 ──
-
-  async sendMessage(text: string): Promise<void> {
+  async sendMessage(text: string, options?: ReplySendOptions): Promise<boolean> {
     const inputArea = getInputAreaFromCache(this.appType)
     if (!inputArea) throw new Error('尚未测量输入框区域')
     const [x, y] = inputArea.coordinates
-    const ok = await sendReplyByCoordsAction(x, y, text)
+    const ok = await sendReplyByCoordsAction(x, y, text, undefined, options)
     if (!ok) throw new Error('发送消息失败')
+    return true
   }
 
-  // 通用 IM 一般单击就能切换会话，统一走 defaultClickPolicy(appType)，
-  // wechat 双击的特例由 RPADevice 自己负责。
   async activeUnreadByClick(coordinates: [number, number]): Promise<void> {
     await activeUnreadByClickAction(coordinates, this.appType, defaultClickPolicy(this.appType))
   }

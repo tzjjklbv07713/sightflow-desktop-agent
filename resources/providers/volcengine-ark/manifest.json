@@ -18,6 +18,11 @@
         "title": "模型名称",
         "default": "doubao-seed-2-0-lite-260215"
       },
+      "baseURL": {
+        "type": "string",
+        "title": "Base URL",
+        "default": "https://ark.cn-beijing.volces.com/api/v3"
+      },
       "systemPrompt": {
         "type": "string",
         "title": "系统提示词",

@@ -1,232 +1,144 @@
-<a name="readme-top"></a>
+# SightFlow.dev
 
-<div align="center">
+<img width="1201" height="495" alt="SightFlow" src="https://github.com/user-attachments/assets/99a7cfec-eb22-4f65-8a76-a6974e46bcf0" />
 
-<h1>SightFlow · The Open-Source Working Memory Engine</h1>
+Official website: [https://sightflow.dev](https://sightflow.dev/)
 
-<p><strong>Bring AI into the real software world — read the screen, get the job done, and accumulate on-the-job experience.</strong></p>
+用户使用说明书：[/docs/user-guide.zh-CN.md](./docs/user-guide.zh-CN.md)
 
-<p>
-  <a href="./README.md"><b>English</b></a>
-  &nbsp;·&nbsp;
-  <a href="./README.zh-CN.md">简体中文</a>
-</p>
+## 项目简介
 
-<p>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License: Apache 2.0" /></a>
-  <a href="https://github.com/sightflow-dev/sightflow-desktop-agent/stargazers"><img src="https://img.shields.io/github/stars/sightflow-dev/sightflow-desktop-agent?logo=github&label=Stars" alt="GitHub Stars" /></a>
-  <a href="https://github.com/sightflow-dev/sightflow-desktop-agent/network/members"><img src="https://img.shields.io/github/forks/sightflow-dev/sightflow-desktop-agent?logo=github&label=Forks" alt="GitHub Forks" /></a>
-  <img src="https://img.shields.io/badge/Platform-Windows%20%7C%20macOS-success" alt="Platform: Windows | macOS" />
-  <a href="https://discord.com/invite/8H6KpbXq3t"><img src="https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white" alt="Join Discord" /></a>
-  <a href="https://sightflow.dev"><img src="https://img.shields.io/badge/Website-sightflow.dev-0A66C2" alt="Website" /></a>
-</p>
+SightFlow Desktop Agent 是一个桌面聊天智能体。它可以观察指定聊天窗口中的新消息，调用模型分析聊天内容，并把生成的回复发送到当前聊天窗口。
 
-<p>
-  <a href="#-getting-started"><b>Get Started</b></a> ·
-  <a href="#-how-it-works--see--think--do--learn"><b>How It Works</b></a> ·
-  <a href="#-configuration"><b>Configuration</b></a> ·
-  <a href="https://sightflow.dev"><b>Website</b></a>
-</p>
+当前项目重点能力包括：
 
-</div>
+- 微信 / 企业微信桌面聊天辅助回复
+- 基于视觉模型的窗口布局识别
+- 手动框选模式下的多桌面聊天软件支持
+- 视觉模型与回复模型分开配置
+- 设置页内的连接测试、模型拉取、诊断导出、启动前预检
 
----
+## AI 模型与智能体配置
 
-## Overview
+项目依赖 OpenAI 兼容接口。
 
-> **SightFlow does not replace the LLM. It completes the one layer the LLM cannot reach** — turning screen pixels into structured semantics, and task intent into real operations.
+桌面端配置主要分成两层：
 
-<div align="center">
-  <video src="https://github.com/user-attachments/assets/fdceada5-940b-45d1-bf96-2d26df651809" width="100%" controls></video>
-</div>
+- 基础配置：填写视觉模型和回复模型的 API Key、模型名、Base URL。
+- 智能体：选择负责聊天分析和回复生成的 Provider。
 
-An enterprise's heaviest work does not live inside an LLM API. It lives **on the screen, inside human workflows**:
+如果你只配置了视觉模型，也可以在设置页中把视觉配置一键同步到回复模型配置。
 
-- **Many surfaces** — a single task spans multiple applications and windows.
-- **Long horizons** — read → judge → act → follow up → recover. It is never one button click.
-- **Tacit experience** — the real know-how lives in every judgment a senior operator makes, not in any document.
+## 目标应用与识别方式
 
-Large language models solved *thinking* and *speaking*. They have **not** yet solved *learning the job* and *doing it well*. SightFlow is the desktop runtime that closes that gap — an agent that **sees** any interface, **thinks** in context, **acts** like a human operator, and **learns** from every execution.
+主界面提供目标应用选择，用来决定桌面端如何测量聊天窗口布局：
 
----
+- 微信、企业微信：默认优先使用 VLM 自动识别
+- 钉钉、飞书、Slack、Telegram、其他桌面应用：默认使用手动框选
 
-## ✦ How It Works — See · Think · Do · Learn
+框选模式下，首次使用需要依次框选：
 
-```mermaid
-flowchart LR
-    SEE["👁 See<br/>Understand any GUI &amp; state"] --> THINK["🧠 Think<br/>Plan with context"]
-    THINK --> DO["✋ Do<br/>Click · Type · Switch · Send"]
-    DO --> LEARN["📚 Learn<br/>Write a structured work-trace"]
-    LEARN -. compounds into memory .-> THINK
-```
+1. 会话列表
+2. 聊天内容区
+3. 输入框
 
-| Stage | What happens |
-| :-- | :-- |
-| **See** | A vision model understands any software UI and its current state. |
-| **Think** | The agent plans using context and history to decide *what to do*. |
-| **Do** | It clicks, types, switches windows, sends, and records — exactly like a human operator. |
-| **Learn** | Every execution is written as a structured **work-trace**, building durable working memory. |
+框选结果会保存到本地，后续可复用，也可以随时重新框选。
 
-> This is not an app. It is a **working memory engine** that puts AI on the job.
+## 启动前建议
 
----
+启动前建议先完成以下检查：
 
-## ✦ The Work Memory Runtime
+1. 视觉模型和回复模型配置完整
+2. 在设置页点击测试连接
+3. 在设置页拉取或刷新模型列表
+4. 查看最近诊断与右侧 Service Health
+5. 查看 Startup Preflight 是否显示“可启动”
 
-Every execution becomes **one structured `work-trace`**:
+## 快速开始
 
-```text
-work-trace = {
-  timestamp,    # when it happened
-  ui_state,     # what the screen looked like
-  rationale,    # WHY this decision was made
-  action,       # click / type / switch / send
-  result        # what happened next
-}
-```
-
-Continuously written and replayable step by step, the runtime offers **three capabilities ordinary RPA cannot**:
-
-| Capability | Why it matters |
-| :-- | :-- |
-| 🔁 **Replay** | When something breaks, review every step — down to the decision behind it. |
-| 📊 **Eval** | Swap models or versions and compare outcomes consistently. |
-| 🧬 **Inherit** | The judgment behind a task is captured once and reused, instead of living only in someone's head. |
-
-> Others record **the steps**. SightFlow records **why each step was taken**. That is the leap from **RPA** to a true **Agent Runtime**.
-
-Built for real-world, sensitive environments:
-
-- 🔒 **Local-first execution** — work traces stay on the machine by default; data never has to leave.
-- 🧾 **Fully auditable** — every action trace can be inspected end to end.
-- 🔄 **Model-agnostic** — adapts to vision LLMs and is switchable across providers.
-
----
-
-## ✦ Core Capabilities
-
-From WeChat and WeCom to **any desktop software**, SightFlow lets AI work where there is **no API**.
-
-- **Universal Vision-Based RPA** — No fragile webhooks or private protocols. SightFlow behaves like a human user: reading chat bubbles, manipulating inputs, and navigating native UIs through abstract visual recognition.
-- **State-of-the-Art Vision** — A unified vision layer extracts unread notification dots, message lists, and chat-bubble text in real time across complex, dynamic layouts.
-- **Agentic Workspaces** — Turn unstructured chat requests into actionable node-workflows and API calls, fully programmable via local AI.
-
----
-
-## 🚀 Getting Started
-
-SightFlow Desktop Agent is a cross-platform client built on **Electron · electron-vite · React · TypeScript**, driven by a Vision-Language Model (VLM).
-
-**Prerequisites:** Node.js (LTS) and npm.
-
-### 1. Install dependencies
+### 1. 安装依赖
 
 ```bash
 npm install
 ```
 
-### 2. Run in development
+### 2. 本地开发运行
 
 ```bash
 npm run dev
 ```
 
-> On first launch, pick your **target application** and complete the region selection, then open **Settings** to enter your API key and confirm the active Provider.
+启动后请先完成：
 
-### 3. Build a release
+- 选择目标应用
+- 必要时完成框选
+- 打开设置页填写模型配置
+- 确认当前启用的智能体
+
+### 3. 构建检查
 
 ```bash
-npm run build:win     # Windows
-npm run build:mac     # macOS
-npm run build:linux   # Linux
+npm run typecheck
+npm run build
 ```
 
----
+### 4. 打包
 
-## ⚙️ Configuration
+```bash
+# Windows
+npm run build:win
 
-Desktop configuration has two layers:
-
-- **Base configuration** — a Volcengine Ark API key powering visual grounding and the built-in Doubao agent.
-- **Agent / Provider** — the provider responsible for chat analysis and reply generation.
-
-### What the key is used for
-
-1. **Smart replies** — the model analyzes chat-window screenshots and generates natural responses (with an anti-self-loop guard).
-2. **VLM visual grounding** — from a screenshot and a prompt, the model locates on-screen UI controls and returns click coordinates, driving a pure-vision RPA flow.
-
-### Steps
-
-1. Open [Volcengine Console → Ark](https://console.volcengine.com/ark), enable the service, and generate your API key.
-2. Launch the app and click the settings button at the bottom-right of the main window.
-3. Under **Base configuration**, enter the API key. The default Base URL `https://ark.cn-beijing.volces.com/api/v3` rarely needs changing.
-4. Under **Agent**, select the active Provider. The built-in default is **Doubao Seed** (`doubao-seed-2-0-lite-260215`).
-
-### Interface preview
-
-| Main | Base Configuration | Agent / Provider |
-| :--: | :--: | :--: |
-| <img width="240" alt="SightFlow main window" src="./docs/images/main.png" /> | <img width="360" alt="SightFlow base configuration" src="./docs/images/settings-base.png" /> | <img width="360" alt="SightFlow agent configuration" src="./docs/images/settings-provider.png" /> |
-
-### Target applications & selection mode
-
-The main window offers a **Target Application** shortcut that decides how the desktop client measures the chat-window layout:
-
-- **WeChat** and **WeCom** use VLM auto-detection of the window region by default.
-- **DingTalk, Feishu, Slack, Telegram**, and other desktop apps default to **manual selection**.
-- When manual selection is required, click **Start Selection** and outline three regions in order: the **conversation list**, the **chat content area**, and the **input box**.
-- Selections are saved locally per target application and reused on subsequent launches; you can re-select at any time.
-
-> VLM vs. manual selection only affects *how layout is measured*. Runtime screenshots, content analysis, reply generation, and message sending all consume the same layout result.
-
-### Provider Hub
-
-SightFlow abstracts "analyze a screenshot and generate a reply" into an independent **Provider**. A provider declares its config schema via `manifest.json` and, through its bundle entry, receives a chat screenshot and returns `reply_text`, `skip`, and `error` events.
-
-- The candidate list is fetched by default from `https://sightflow.dev/provider-hub.json`.
-- The hub only tracks each provider's `manifestUrl`; UI fields come from each provider's manifest.
-- Results are cached locally after first load; the local cache is preferred unless you refresh via the button next to the Agent title.
-- **Doubao Seed** is always retained locally as the default provider, so there is always an option if the remote list is unavailable.
-
-External provider integration is documented in the [Chat Provider docs](./docs/provider.md). A Doubao / Volcengine Ark sample remains in the repo for reference:
-
-```text
-resources/providers/volcengine-ark/manifest.json
-resources/providers/volcengine-ark/provider.bundle.js
+# macOS
+npm run build:mac
 ```
 
-> **Recommended dev setup:** [VS Code](https://code.visualstudio.com/) + [ESLint](https://marketplace.visualstudio.com/items?itemName=dbaeumer.vscode-eslint) + [Prettier](https://marketplace.visualstudio.com/items?itemName=esbenp.prettier-vscode).
+## Provider Hub
 
----
+当前应用内置一个简单的 Provider Hub：
 
-## 🔐 Security & Data Ownership
+- 默认从 `https://sightflow.dev/provider-hub.json` 拉取候选 Provider 列表
+- 首次加载后会缓存到本地
+- 本地始终保留内置的豆包 Seed 作为默认 Provider
 
-SightFlow's work traces are stored **locally by default** — never uploaded to any server, never included in any public training dataset. Open-source code does **not** mean open data: **your work data always belongs to you.**
+外部 Provider 接入说明见：[/docs/provider.md](./docs/provider.md)
 
----
+## 相关文档
 
-## 🤝 Contributing & Community
+- 用户使用说明：[/docs/user-guide.zh-CN.md](./docs/user-guide.zh-CN.md)
+- Provider 接入：[/docs/provider.md](./docs/provider.md)
+- 项目分析：[/docs/project-analysis.zh-CN.md](./docs/project-analysis.zh-CN.md)
+- 长期路线图：[/docs/roadmap.long-term.zh-CN.md](./docs/roadmap.long-term.zh-CN.md)
+- WorkBuddy 接手计划：[/docs/workbuddy-handoff-plan.zh-CN.md](./docs/workbuddy-handoff-plan.zh-CN.md)
 
-We believe **Agent Computer-Use will be foundational infrastructure for the next decade of AI**. If you want to help build it, come join us.
 
-- 💬 **[Join our Discord](https://discord.com/invite/8H6KpbXq3t)** — co-build with the community.
-- ⭐ **[Star the repo](https://github.com/sightflow-dev/sightflow-desktop-agent)** — it genuinely helps.
-- 🛠 **Contribute** — issues and pull requests are welcome.
+## 工程基线（1.0.0 商用版）
 
----
+以下是接手人在新机器上能复现的最小命令集。三条命令全部为绿色才能认为基线 OK：
 
-## 📄 License
+```bash
+npm run typecheck       # node + web 双 0 错
+npm run test:core       # 11/11 套件全过（Redact / ReplyPolicy / KB / UIA / CircuitBreaker / SettingsExport 等）
+npm run build           # Vite 三 bundle 成功
+npm run stability:sim   # 8h 模拟跑 out/stability-report.json（0 崩溃 / p99<5s / 内存<200MB）
+npm run acceptance:check # 55/55 断言（源文件 / 试点文档 / IPC / 安全闸门 / 子命令 / 必备 scripts）
+```
 
-Released under the [Apache License 2.0](LICENSE).
+当前快照（2026-06-23）：
 
----
+| 指标 | 值 |
+| --- | --- |
+| typecheck | node + web 0 错 |
+| test:core | 11/11 套件 |
+| build | main 140KB / renderer 554KB |
+| acceptance:check | 55/55 断言 |
+| 8h 模拟 | 14400 消息 / 0 崩溃 / 发送 200 / 拦截 2846 / 跳过 11354 |
+| p99 延迟 | 3.15s |
+| 内存增长 | 5.1MB |
+| 燃断器 | 未跳 |
 
-## 📬 Contact
+新接入测试或修改后，至少需要把上面 4 条命令跑通再发版。完整变动记录见 [CHANGELOG.md](./CHANGELOG.md)。
+## 开发环境建议
 
-- 🌐 **Website:** [sightflow.dev](https://sightflow.dev)
-- ✉️ **Email:** [builder@sightflow.dev](mailto:builder@sightflow.dev)
-- 💬 **Discord:** [Join the server](https://discord.com/invite/8H6KpbXq3t)
-
-<div align="center"><sub>© 2026 SightFlow. Released under the Apache License 2.0.</sub></div>
-
-<p align="right"><a href="#readme-top">↑ Back to top</a></p>
+- [VSCode](https://code.visualstudio.com/)
+- [ESLint](https://marketplace.visualstudio.com/items?itemName=dbaeumer.vscode-eslint)
+- [Prettier](https://marketplace.visualstudio.com/items?itemName=esbenp.prettier-vscode)

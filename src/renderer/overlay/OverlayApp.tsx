@@ -53,6 +53,52 @@ const STEP_HINT: Record<WizardStepKey, string> = {
 
 const MIN_DRAG_PX = 6
 
+function readOverlayPreviewStep(): WizardStepKey | null {
+  const params = new URLSearchParams(window.location.search)
+  if (params.get('overlayPreview') !== 'demo') return null
+  const step = params.get('step')
+  if (step === 'contactList' || step === 'chatMain' || step === 'inputBox') return step
+  return 'inputBox'
+}
+
+function buildOverlayPreview(
+  step: WizardStepKey
+): {
+  init: InitPayload
+  stepIdx: number
+  committed: Partial<Record<WizardStepKey, ScreenRect>>
+} {
+  const steps: WizardStepKey[] = ['contactList', 'chatMain', 'inputBox']
+  const rects: Record<WizardStepKey, ScreenRect> = {
+    contactList: { x: 118, y: 172, width: 248, height: 452 },
+    chatMain: { x: 398, y: 172, width: 760, height: 326 },
+    inputBox: { x: 398, y: 528, width: 760, height: 96 }
+  }
+  const stepIdx = Math.max(0, steps.indexOf(step))
+  const committed: Partial<Record<WizardStepKey, ScreenRect>> = {}
+
+  for (const key of steps.slice(0, stepIdx)) {
+    committed[key] = rects[key]
+  }
+
+  return {
+    init: {
+      id: 'overlay-preview',
+      appType: 'wechat',
+      steps,
+      prefill: null,
+      display: {
+        id: 1,
+        bounds: { x: 0, y: 0, width: 1366, height: 820 },
+        scaleFactor: 1
+      },
+      contentOriginAbs: { x: 0, y: 0 }
+    },
+    stepIdx,
+    committed
+  }
+}
+
 interface PointerState {
   pointerId: number
   startX: number
@@ -124,6 +170,7 @@ export function OverlayApp(): React.ReactElement {
   const [pointer, setPointer] = useState<PointerState | null>(null)
   const [committed, setCommitted] = useState<Partial<Record<WizardStepKey, ScreenRect>>>({})
   const cancelArmedRef = useRef(false)
+  const previewStep = useMemo(() => readOverlayPreviewStep(), [])
 
   useEffect(() => {
     const cleanup = window.electron?.on('overlay-wizard:init', (payload) => {
@@ -133,6 +180,14 @@ export function OverlayApp(): React.ReactElement {
     })
     return cleanup
   }, [])
+
+  useEffect(() => {
+    if (init || !previewStep) return
+    const preview = buildOverlayPreview(previewStep)
+    setInit(preview.init)
+    setStepIdx(preview.stepIdx)
+    setCommitted(preview.committed)
+  }, [init, previewStep])
 
   const steps = init?.steps ?? []
   const currentStep = steps[stepIdx]
@@ -256,7 +311,7 @@ export function OverlayApp(): React.ReactElement {
 
   if (!init || !currentStep) {
     return (
-      <div className="overlay">
+      <div className="overlay overlay--loading">
         <div className="overlay__header">
           <span className="overlay__hint">正在加载框选向导...</span>
         </div>
@@ -266,7 +321,7 @@ export function OverlayApp(): React.ReactElement {
 
   return (
     <div
-      className="overlay"
+      className={`overlay overlay--${currentStep}`}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
@@ -284,11 +339,11 @@ export function OverlayApp(): React.ReactElement {
         </span>
         <div className="overlay__actions">
           {stepIdx > 0 && (
-            <button className="overlay__btn" onClick={onBack}>
+            <button className="overlay__btn overlay__btn--neutral" onClick={onBack}>
               上一步
             </button>
           )}
-          <button className="overlay__btn" onClick={onAbort}>
+          <button className="overlay__btn overlay__btn--danger" onClick={onAbort}>
             取消
           </button>
         </div>
@@ -307,16 +362,16 @@ export function OverlayApp(): React.ReactElement {
         return (
           <div key={key}>
             <div
-              className="overlay__committed"
+              className={`overlay__committed overlay__committed--${key}`}
               style={{ left: rect.x, top: rect.y, width: rect.width, height: rect.height }}
             >
-              <span className="overlay__committed-label">{STEP_TITLE[key]}</span>
+              <span className={`overlay__committed-label overlay__committed-label--${key}`}>{STEP_TITLE[key]}</span>
             </div>
             <svg
               className={
                 isInput
-                  ? 'overlay__crosshair overlay__crosshair--input'
-                  : 'overlay__crosshair'
+                  ? 'overlay__crosshair overlay__crosshair--inputBox'
+                  : `overlay__crosshair overlay__crosshair--${key}`
               }
               style={{ left: cx, top: cy }}
               viewBox="0 0 24 24"
@@ -336,7 +391,7 @@ export function OverlayApp(): React.ReactElement {
       {/* live drag rect */}
       {liveRect && (
         <div
-          className="overlay__rect"
+          className={`overlay__rect overlay__rect--${currentStep}`}
           style={{
             left: liveRect.x,
             top: liveRect.y,

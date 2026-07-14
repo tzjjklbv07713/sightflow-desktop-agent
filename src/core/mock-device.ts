@@ -1,22 +1,19 @@
-// src/core/mock-device.ts
-// MockDevice — DesktopDevice 的模拟实现（用于开发测试）
-
-import { DesktopDevice } from './device'
 import { desktopCapturer } from 'electron'
-import { AppType } from './rpa/types'
+import { DesktopDevice } from './device'
+import { LatestMessageInspection } from './rpa/latest-message-inspector'
 import { BBox } from './rpa/vision-utils'
 
 export class MockDevice implements DesktopDevice {
-  setAppType(_appType: AppType): void {
-    // Mock 不依赖窗口类型
+  setAppType(): void {
+    // Mock 不依赖窗口类型。
   }
 
-  setApiKey(_apiKey: string): void {
-    // Mock: 不需要 API key
+  setApiKey(): void {
+    // Mock 不需要 API key。
   }
 
   async measureLayout(): Promise<{ success: boolean; error?: string }> {
-    console.log('[MockDevice] 布局测量（模拟）✓')
+    console.log('[MockDevice] 布局测量：模拟成功')
     return { success: true }
   }
 
@@ -31,11 +28,19 @@ export class MockDevice implements DesktopDevice {
     throw new Error('No screen sources found')
   }
 
+  async inspectLatestMessage(): Promise<LatestMessageInspection> {
+    return {
+      detected: false,
+      latestFromSelf: false,
+      confidence: 0,
+      reason: 'mock'
+    }
+  }
+
   async hasUnreadMessage(): Promise<{
     hasUnread: boolean
     chatEntranceArea?: { bbox: BBox; coordinates: [number, number] }
   }> {
-    // Mock: 15% 概率检测到未读
     return { hasUnread: Math.random() > 0.85 }
   }
 
@@ -43,30 +48,29 @@ export class MockDevice implements DesktopDevice {
     isUnread: boolean
     firstContactCoords?: [number, number]
   }> {
-    // Mock: 总是返回有未读
     return { isUnread: true, firstContactCoords: [200, 200] }
   }
 
   clearUnreadCache(): void {
-    console.log('[MockDevice] 清除未读缓存（模拟）')
+    console.log('[MockDevice] 清除未读缓存：模拟')
   }
 
   async setChatBaseline(): Promise<boolean> {
-    console.log('[MockDevice] 设置 chatMainArea baseline（模拟）')
+    console.log('[MockDevice] 设置聊天区基线：模拟')
     return true
   }
 
   async hasChatAreaChanged(): Promise<{ hasDiff: boolean; hasBaseline: boolean }> {
-    // Mock: 10% 概率检测到变化
     return { hasDiff: Math.random() > 0.9, hasBaseline: true }
   }
 
   clearChatBaseline(): void {
-    console.log('[MockDevice] 清除 chatMainArea baseline（模拟）')
+    console.log('[MockDevice] 清除聊天区基线：模拟')
   }
 
-  async sendMessage(text: string): Promise<void> {
+  async sendMessage(text: string): Promise<boolean> {
     console.log(`[MockDevice] Sent: ${text}`)
+    return true
   }
 
   async activeUnreadByClick(coordinates: [number, number]): Promise<void> {

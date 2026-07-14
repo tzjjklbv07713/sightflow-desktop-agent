@@ -4,13 +4,7 @@
   "description": "SightFlow Desktop Agent - AI-powered cross-platform desktop RPA client based on Electron and VLM",
   "main": "./out/main/index.js",
   "author": "sightflow-dev",
-  "license": "Apache-2.0",
   "homepage": "https://github.com/sightflow-dev/sightflow-desktop-agent",
-  "overrides": {
-    "@hurdlegroup/robotjs": {
-      "node-addon-api": "^8.7.0"
-    }
-  },
   "scripts": {
     "format": "prettier --write .",
     "lint": "eslint --cache .",
@@ -22,6 +16,15 @@
     "dev:test-screenshot": "electron-vite build && cross-env TEST_MODE=screenshot electron ./out/main/test-cli.js",
     "dev:test-reply": "electron-vite build && cross-env TEST_MODE=reply electron ./out/main/test-cli.js",
     "dev:test-switch": "electron-vite build && cross-env TEST_MODE=switch electron ./out/main/test-cli.js",
+    "dev:test-group-debug": "electron-vite build && cross-env TEST_MODE=group-debug electron ./out/main/test-cli.js",
+    "dev:test-group-rules": "electron-vite build && cross-env TEST_MODE=group-rules electron ./out/main/test-cli.js",
+    "dev:test-workbench-capture": "electron-vite build && cross-env TEST_MODE=workbench-capture electron ./out/main/test-cli.js",
+    "dev:test-overlay-capture": "electron-vite build && cross-env TEST_MODE=overlay-capture electron ./out/main/test-cli.js",
+    "dev:test-perception": "electron-vite build && cross-env TEST_MODE=perception electron ./out/main/test-cli.js",
+    "dev:test-uia": "electron-vite build && cross-env TEST_MODE=uia electron ./out/main/test-cli.js",
+    "test:core": "node scripts/run-core-tests.mjs",
+    "stability:sim": "tsx scripts/stability-harness.mjs",
+    "acceptance:check": "node scripts/acceptance-check.mjs",
     "build": "npm run typecheck && electron-vite build",
     "postinstall": "patch-package && electron-builder install-app-deps",
     "build:unpack": "npm run build && electron-builder --dir",
@@ -65,6 +68,7 @@
     "react": "^19.2.1",
     "react-dom": "^19.2.1",
     "ts-node": "^10.9.2",
+    "tsx": "^4.22.4",
     "typescript": "^5.9.3",
     "vite": "^7.2.6"
   }

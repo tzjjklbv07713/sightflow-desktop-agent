@@ -116,6 +116,14 @@ export class BundleProviderAdapter implements ProviderAdapter {
       case 'thinking':
       case 'reply_text':
         return typeof event.content === 'string'
+      case 'observed_message':
+        return Boolean(event.message) && typeof event.message === 'object'
+      case 'reply_relevance':
+        return (
+          Boolean(event.result) &&
+          typeof event.result === 'object' &&
+          typeof event.replyText === 'string'
+        )
       case 'skip':
         return true
       case 'error':

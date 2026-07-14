@@ -2,169 +2,264 @@
   position: fixed;
   inset: 0;
   cursor: crosshair;
-  background: rgba(10, 11, 16, 0.18);
+  --overlay-accent: #38bdf8;
+  --overlay-accent-rgb: 56, 189, 248;
+  --overlay-panel-bg: rgba(15, 23, 42, 0.9);
+  --overlay-panel-border: rgba(148, 163, 184, 0.22);
+  background:
+    linear-gradient(180deg, rgba(var(--overlay-accent-rgb), 0.08), transparent 30%),
+    rgba(2, 6, 23, 0.24);
   color: #f8fafc;
   font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif;
 }
 
+.overlay--loading {
+  --overlay-accent: #38bdf8;
+  --overlay-accent-rgb: 56, 189, 248;
+}
+
+.overlay--contactList {
+  --overlay-accent: #60a5fa;
+  --overlay-accent-rgb: 96, 165, 250;
+}
+
+.overlay--chatMain {
+  --overlay-accent: #c084fc;
+  --overlay-accent-rgb: 192, 132, 252;
+}
+
+.overlay--inputBox {
+  --overlay-accent: #f87171;
+  --overlay-accent-rgb: 248, 113, 113;
+}
+
 .overlay__header {
   position: absolute;
-  top: 24px;
+  top: 20px;
   left: 50%;
   transform: translateX(-50%);
   display: flex;
   align-items: center;
-  gap: 16px;
-  padding: 14px 22px;
-  border-radius: 999px;
-  background: rgba(15, 23, 42, 0.9);
-  box-shadow: 0 16px 32px rgba(2, 6, 23, 0.45);
+  gap: 14px;
+  max-width: calc(100vw - 64px);
+  padding: 14px 18px;
+  border: 1px solid rgba(var(--overlay-accent-rgb), 0.24);
+  border-radius: 20px;
+  background:
+    linear-gradient(180deg, rgba(var(--overlay-accent-rgb), 0.12), transparent 55%),
+    var(--overlay-panel-bg);
+  box-shadow:
+    0 18px 42px rgba(2, 6, 23, 0.44),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  backdrop-filter: blur(18px);
   font-size: 14px;
   cursor: default;
   pointer-events: auto;
 }
 
 .overlay__step {
-  font-weight: 600;
-  letter-spacing: 0.4px;
-  color: #38bdf8;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 10px;
+  border: 1px solid rgba(var(--overlay-accent-rgb), 0.34);
+  border-radius: 999px;
+  background: rgba(var(--overlay-accent-rgb), 0.14);
+  color: var(--overlay-accent);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
 }
 
 .overlay__hint {
-  color: #cbd5e1;
+  color: #d7deea;
+  line-height: 1.45;
+}
+
+.overlay__hint strong {
+  color: #ffffff;
 }
 
 .overlay__actions {
   display: flex;
   gap: 8px;
+  margin-left: auto;
 }
 
 .overlay__btn {
   appearance: none;
-  border: 1px solid rgba(148, 163, 184, 0.4);
-  background: rgba(30, 41, 59, 0.7);
+  border: 1px solid rgba(148, 163, 184, 0.36);
+  background: rgba(30, 41, 59, 0.72);
   color: #f8fafc;
-  padding: 6px 12px;
-  border-radius: 6px;
+  padding: 7px 12px;
+  border-radius: 10px;
   font-size: 12px;
+  font-weight: 600;
   cursor: pointer;
-  transition: background 0.12s ease;
+  transition:
+    border-color 0.12s ease,
+    background 0.12s ease,
+    transform 0.12s ease,
+    box-shadow 0.12s ease;
 }
 
 .overlay__btn:hover {
-  background: rgba(56, 189, 248, 0.2);
+  background: rgba(var(--overlay-accent-rgb), 0.18);
+  border-color: rgba(var(--overlay-accent-rgb), 0.4);
+  transform: translateY(-1px);
+}
+
+.overlay__btn:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
+.overlay__btn--neutral {
+  background: rgba(30, 41, 59, 0.72);
+}
+
+.overlay__btn--danger {
+  border-color: rgba(248, 113, 113, 0.34);
+  background: rgba(127, 29, 29, 0.44);
+  color: #fecaca;
+}
+
+.overlay__btn--danger:hover {
+  background: rgba(248, 113, 113, 0.18);
+  border-color: rgba(248, 113, 113, 0.44);
 }
 
 .overlay__btn--primary {
-  background: rgba(56, 189, 248, 0.85);
-  color: #0f172a;
-  border-color: transparent;
+  border-color: rgba(var(--overlay-accent-rgb), 0.42);
+  background: rgba(var(--overlay-accent-rgb), 0.88);
+  color: #08111f;
 }
 
 .overlay__btn--primary:hover {
-  background: #38bdf8;
+  background: rgba(var(--overlay-accent-rgb), 1);
 }
 
-/* live drag rectangle */
 .overlay__rect {
   position: absolute;
-  border: 2px solid rgba(56, 189, 248, 0.95);
-  background: rgba(56, 189, 248, 0.18);
+  border: 2px solid rgba(var(--overlay-accent-rgb), 0.96);
+  background: rgba(var(--overlay-accent-rgb), 0.16);
+  border-radius: 10px;
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.08),
+    0 16px 32px rgba(2, 6, 23, 0.22);
+  pointer-events: none;
+}
+
+.overlay__rect--contactList,
+.overlay__rect--chatMain,
+.overlay__rect--inputBox {
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.08),
+    0 16px 32px rgba(2, 6, 23, 0.22);
+}
+
+.overlay__committed {
+  position: absolute;
+  --committed-accent-rgb: 148, 163, 184;
+  border: 1.5px dashed rgba(var(--committed-accent-rgb), 0.78);
+  background: rgba(var(--committed-accent-rgb), 0.08);
   border-radius: 8px;
   pointer-events: none;
 }
 
-/* committed rectangles from earlier steps stay visible as muted outlines */
-.overlay__committed {
-  position: absolute;
-  border: 1.5px dashed rgba(148, 163, 184, 0.7);
-  border-radius: 6px;
-  pointer-events: none;
+.overlay__committed--contactList {
+  --committed-accent-rgb: 96, 165, 250;
+}
+
+.overlay__committed--chatMain {
+  --committed-accent-rgb: 192, 132, 252;
+}
+
+.overlay__committed--inputBox {
+  --committed-accent-rgb: 248, 113, 113;
 }
 
 .overlay__committed-label {
   position: absolute;
-  top: -22px;
+  top: -24px;
   left: 0;
-  padding: 2px 8px;
+  padding: 3px 9px;
   font-size: 11px;
-  background: rgba(15, 23, 42, 0.85);
-  color: #94a3b8;
+  border: 1px solid rgba(var(--committed-accent-rgb), 0.28);
+  background: rgba(15, 23, 42, 0.88);
+  color: rgb(var(--committed-accent-rgb));
   border-radius: 999px;
   white-space: nowrap;
 }
 
-/* mini IM-window schematic in the wizard header.
- * Tiny on purpose: it lives next to the step text in the always-on-top header
- * pill and never intrudes into the screen area the user is trying to frame. */
 .overlay__layout-preview {
   position: relative;
   width: 88px;
   height: 56px;
   flex-shrink: 0;
-  border-radius: 6px;
-  background: rgba(15, 23, 42, 0.55);
-  border: 1px solid rgba(148, 163, 184, 0.35);
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.58);
+  border: 1px solid rgba(148, 163, 184, 0.32);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
 }
 
 .overlay__layout-cell {
   position: absolute;
-  border-radius: 3px;
-  background: rgba(148, 163, 184, 0.22);
+  --cell-accent-rgb: 148, 163, 184;
+  border-radius: 4px;
+  background: rgba(var(--cell-accent-rgb), 0.18);
   transition:
     background 0.18s ease,
     box-shadow 0.18s ease,
     transform 0.18s ease;
 }
 
-/* contact list — left strip */
 .overlay__layout-cell--list {
+  --cell-accent-rgb: 96, 165, 250;
   left: 4px;
   top: 4px;
   bottom: 4px;
   width: 22px;
 }
 
-/* chat main — top-right block */
 .overlay__layout-cell--chat {
+  --cell-accent-rgb: 192, 132, 252;
   left: 30px;
   right: 4px;
   top: 4px;
   height: 32px;
 }
 
-/* input box — bottom-right strip */
 .overlay__layout-cell--input {
+  --cell-accent-rgb: 248, 113, 113;
   left: 30px;
   right: 4px;
   bottom: 4px;
   height: 12px;
 }
 
-/* committed steps: solid muted blue */
 .overlay__layout-cell.is-done {
-  background: rgba(56, 189, 248, 0.45);
+  background: rgba(var(--cell-accent-rgb), 0.42);
 }
 
-/* current step: bright + pulse so the user can match the cell to the
- * region they should frame next. */
 .overlay__layout-cell.is-active {
-  background: rgba(56, 189, 248, 0.95);
-  box-shadow: 0 0 0 0 rgba(56, 189, 248, 0.7);
+  background: rgba(var(--cell-accent-rgb), 0.95);
+  box-shadow: 0 0 0 0 rgba(var(--cell-accent-rgb), 0.66);
   animation: overlayLayoutPulse 1.6s ease-in-out infinite;
 }
 
 @keyframes overlayLayoutPulse {
   0%,
   100% {
-    box-shadow: 0 0 0 0 rgba(56, 189, 248, 0.55);
+    box-shadow: 0 0 0 0 rgba(var(--cell-accent-rgb), 0.55);
   }
   50% {
-    box-shadow: 0 0 0 4px rgba(56, 189, 248, 0);
+    box-shadow: 0 0 0 4px rgba(var(--cell-accent-rgb), 0);
   }
 }
 
-/* center crosshair: shows users *exactly* where the click will land */
 .overlay__crosshair {
   position: absolute;
   width: 24px;
@@ -172,27 +267,40 @@
   margin-left: -12px;
   margin-top: -12px;
   pointer-events: none;
-  color: rgba(148, 163, 184, 0.85);
+  color: rgba(148, 163, 184, 0.88);
 }
 
-/* the inputBox crosshair gets a brighter, larger marker — that's the most
- * sensitive point (paste + Enter target) and the one users want to verify. */
-.overlay__crosshair--input {
+.overlay__crosshair--contactList {
+  color: #60a5fa;
+  filter: drop-shadow(0 0 4px rgba(96, 165, 250, 0.5));
+}
+
+.overlay__crosshair--chatMain {
+  color: #c084fc;
+  filter: drop-shadow(0 0 4px rgba(192, 132, 252, 0.5));
+}
+
+.overlay__crosshair--inputBox {
   width: 36px;
   height: 36px;
   margin-left: -18px;
   margin-top: -18px;
-  color: #f87171; /* red-400 */
-  filter: drop-shadow(0 0 4px rgba(248, 113, 113, 0.6));
+  color: #f87171;
+  filter: drop-shadow(0 0 6px rgba(248, 113, 113, 0.68));
 }
 
 .overlay__footer {
   position: absolute;
-  bottom: 24px;
+  bottom: 20px;
   left: 50%;
   transform: translateX(-50%);
+  padding: 9px 14px;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.76);
+  backdrop-filter: blur(12px);
   font-size: 12px;
-  color: #94a3b8;
+  color: #c1cada;
   cursor: default;
   pointer-events: auto;
 }

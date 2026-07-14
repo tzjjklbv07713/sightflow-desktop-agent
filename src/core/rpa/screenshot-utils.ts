@@ -1,7 +1,8 @@
 import { intToRGBA, Jimp } from 'jimp'
-import { desktopCapturer, screen } from 'electron'
+import { desktopCapturer, nativeImage, screen } from 'electron'
 import { getWindowInfo, getWechatWindowInfo } from './window-utils'
 import { AppType, ScreenRect } from './types'
+import { bboxToCropBounds, getLayoutCache } from './layout-cache'
 
 const IS_MAC = process.platform === 'darwin'
 
@@ -17,9 +18,23 @@ interface ScreenshotCache {
   timestamp: number
 }
 
+interface DisplayFrameCache {
+  thumbnail: Electron.NativeImage
+  display: {
+    id: number
+    bounds: { x: number; y: number; width: number; height: number }
+    scaleFactor: number
+  }
+  timestamp: number
+}
+
 const screenshotCache = new Map<string, ScreenshotCache>()
 const screenshotPendingPromises = new Map<string, Promise<ScreenshotCache | null>>()
-const SCREENSHOT_CACHE_DURATION = 100 // 100ms
+const displayFrameCache = new Map<string, DisplayFrameCache>()
+const displayFramePendingPromises = new Map<string, Promise<DisplayFrameCache | null>>()
+
+const SCREENSHOT_CACHE_DURATION = 100
+const DISPLAY_FRAME_CACHE_DURATION = 300
 
 function getCropHash(crop?: { x: number; y: number; width: number; height: number }): string {
   if (!crop) return 'no-crop'
@@ -33,6 +48,81 @@ function getScreenshotCacheKey(
   return `${displayId}-${getCropHash(crop)}`
 }
 
+function getDisplayFrameCacheKey(displayId: number): string {
+  return String(displayId)
+}
+
+function cropFromFrame(
+  frame: Electron.NativeImage,
+  displayBounds: Electron.Rectangle,
+  scaleFactor: number,
+  rect: { x: number; y: number; width: number; height: number }
+): Electron.NativeImage {
+  const cropRect = {
+    x: Math.round((rect.x - displayBounds.x) * scaleFactor),
+    y: Math.round((rect.y - displayBounds.y) * scaleFactor),
+    width: Math.max(1, Math.round(rect.width * scaleFactor)),
+    height: Math.max(1, Math.round(rect.height * scaleFactor))
+  }
+
+  return frame.crop(cropRect)
+}
+
+async function getDisplayFrame(display: {
+  id: number
+  bounds: Electron.Rectangle
+  scaleFactor: number
+}): Promise<DisplayFrameCache | null> {
+  const cacheKey = getDisplayFrameCacheKey(display.id)
+  const now = Date.now()
+  const cached = displayFrameCache.get(cacheKey)
+  if (cached && now - cached.timestamp < DISPLAY_FRAME_CACHE_DURATION) {
+    return cached
+  }
+
+  const pending = displayFramePendingPromises.get(cacheKey)
+  if (pending) return pending
+
+  const capturePromise = (async (): Promise<DisplayFrameCache | null> => {
+    try {
+      const physicalWidth = Math.round(display.bounds.width * display.scaleFactor)
+      const physicalHeight = Math.round(display.bounds.height * display.scaleFactor)
+
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('desktopCapturer timeout')), 5000)
+      })
+
+      const screenSources = (await Promise.race([
+        desktopCapturer.getSources({
+          types: ['screen'],
+          thumbnailSize: { width: physicalWidth, height: physicalHeight }
+        }),
+        timeoutPromise
+      ])) as Electron.DesktopCapturerSource[]
+
+      const matchedScreenSource =
+        screenSources.find((s) => String(s.display_id) === String(display.id)) || screenSources[0]
+      if (!matchedScreenSource) return null
+
+      const result: DisplayFrameCache = {
+        thumbnail: matchedScreenSource.thumbnail,
+        display,
+        timestamp: Date.now()
+      }
+      displayFrameCache.set(cacheKey, result)
+      return result
+    } catch (error) {
+      console.error('[captureWechatWindow] display frame capture error:', error)
+      return null
+    } finally {
+      displayFramePendingPromises.delete(cacheKey)
+    }
+  })()
+
+  displayFramePendingPromises.set(cacheKey, capturePromise)
+  return capturePromise
+}
+
 export function getChatContactAvatarBounds(): {
   x: number
   y: number
@@ -43,6 +133,69 @@ export function getChatContactAvatarBounds(): {
     return { x: 72, y: 64, width: 46, height: 68 }
   }
   return { x: 70, y: 64, width: 46, height: 68 }
+}
+
+export function cropDataUrlImage(
+  base64Image: string,
+  rect: { x: number; y: number; width: number; height: number },
+  scaleFactor: number
+): string | null {
+  try {
+    const image = nativeImage.createFromDataURL(base64Image)
+    if (image.isEmpty()) return null
+
+    const cropRect = {
+      x: Math.max(0, Math.round(rect.x * scaleFactor)),
+      y: Math.max(0, Math.round(rect.y * scaleFactor)),
+      width: Math.max(1, Math.round(rect.width * scaleFactor)),
+      height: Math.max(1, Math.round(rect.height * scaleFactor))
+    }
+
+    const cropped = image.crop(cropRect)
+    return cropped.toDataURL()
+  } catch (error) {
+    console.error('[cropDataUrlImage] crop failed:', error)
+    return null
+  }
+}
+
+export function cropLatestMessageFocusScreenshot(
+  base64Image: string,
+  bubble?: { x: number; y: number; width: number; height: number; bottomY: number; centerX: number } | null
+): string | null {
+  if (!bubble) return base64Image
+
+  try {
+    const image = nativeImage.createFromDataURL(base64Image)
+    if (image.isEmpty()) return null
+
+    const { width, height } = image.getSize()
+    if (width <= 0 || height <= 0) return null
+
+    const bottomPadding = Math.max(120, Math.round(height * 0.18))
+    const minHeight = Math.max(1, Math.round(height * 0.58))
+    const endY = Math.min(height, Math.max(minHeight, Math.ceil(bubble.bottomY + bottomPadding)))
+
+    if (endY >= height - Math.max(8, Math.round(height * 0.03))) {
+      return base64Image
+    }
+
+    const cropped = image.crop({ x: 0, y: 0, width, height: endY })
+    return cropped.isEmpty() ? base64Image : cropped.toDataURL()
+  } catch (error) {
+    console.error('[cropLatestMessageFocusScreenshot] crop failed:', error)
+    return base64Image
+  }
+}
+
+export function dataUrlToNativeImage(base64Image: string): Electron.NativeImage | null {
+  try {
+    const image = nativeImage.createFromDataURL(base64Image)
+    return image.isEmpty() ? null : image
+  } catch (error) {
+    console.error('[dataUrlToNativeImage] convert failed:', error)
+    return null
+  }
 }
 
 export const takeWeChatScreenshot = async ({ wechatType = 'wechat' }: { wechatType: AppType }) => {
@@ -85,7 +238,7 @@ export async function calculateRedDotPercentage(
       }
     }
     return (redPixelCount / totalPixels) * 100
-  } catch (error) {
+  } catch {
     return null
   }
 }
@@ -98,11 +251,7 @@ export async function captureWechatWindow(
     const windowCoreResult = await getWechatWindowInfo(appType)
     if (!windowCoreResult) return { success: false, error: '未找到窗口' }
 
-    const {
-      display,
-      bounds,
-      display: { scaleFactor }
-    } = windowCoreResult
+    const { display, bounds } = windowCoreResult
     const cacheKey = getScreenshotCacheKey(display.id, crop)
 
     const cached = screenshotCache.get(cacheKey)
@@ -111,13 +260,6 @@ export async function captureWechatWindow(
       const resultBounds = crop
         ? { x: bounds.x + crop.x, y: bounds.y + crop.y, width: crop.width, height: crop.height }
         : bounds
-      console.log('[captureWechatWindow] 命中缓存:', {
-        appType,
-        cacheKey,
-        ageMs: now - cached.timestamp,
-        hasNativeImage: Boolean(cached.nativeImage),
-        crop: crop || null
-      })
       return {
         success: true,
         screenshotBase64: cached.screenshotBase64,
@@ -130,54 +272,25 @@ export async function captureWechatWindow(
 
     const capturePromise = (async (): Promise<ScreenshotCache | null> => {
       try {
-        const physicalWidth = Math.round(display.bounds.width * scaleFactor)
-        const physicalHeight = Math.round(display.bounds.height * scaleFactor)
+        const frame = await getDisplayFrame(display)
+        if (!frame) return null
 
-        // Add a timeout to desktopCapturer.getSources to prevent deadlocks
-        const timeoutPromise = new Promise((_, reject) => {
-          setTimeout(() => reject(new Error('desktopCapturer timeout')), 5000)
-        })
+        const targetRect = crop
+          ? { x: bounds.x + crop.x, y: bounds.y + crop.y, width: crop.width, height: crop.height }
+          : bounds
 
-        const screenSources = (await Promise.race([
-          desktopCapturer.getSources({
-            types: ['screen'],
-            thumbnailSize: { width: physicalWidth, height: physicalHeight }
-          }),
-          timeoutPromise
-        ])) as Electron.DesktopCapturerSource[]
-
-        const matchedScreenSource =
-          screenSources.find((s) => String(s.display_id) === String(display.id)) || screenSources[0]
-        if (!matchedScreenSource) return null
-
-        let cropRect = {
-          x: Math.round((bounds.x - display.bounds.x) * scaleFactor),
-          y: Math.round((bounds.y - display.bounds.y) * scaleFactor),
-          width: Math.round(bounds.width * scaleFactor),
-          height: Math.round(bounds.height * scaleFactor)
-        }
-
-        if (crop) {
-          const cropPhysical = {
-            x: Math.round(crop.x * scaleFactor),
-            y: Math.round(crop.y * scaleFactor),
-            width: Math.round(crop.width * scaleFactor),
-            height: Math.round(crop.height * scaleFactor)
-          }
-          cropRect = {
-            x: Math.round(cropRect.x + cropPhysical.x),
-            y: Math.round(cropRect.y + cropPhysical.y),
-            width: cropPhysical.width,
-            height: cropPhysical.height
-          }
-        }
-
-        const croppedNativeImage = matchedScreenSource.thumbnail.crop(cropRect)
+        const croppedNativeImage = cropFromFrame(
+          frame.thumbnail,
+          frame.display.bounds,
+          frame.display.scaleFactor,
+          targetRect
+        )
         const croppedScreenshot = croppedNativeImage.toDataURL()
 
         const resultBounds = crop
           ? { x: bounds.x + crop.x, y: bounds.y + crop.y, width: crop.width, height: crop.height }
           : bounds
+
         const cacheResult: ScreenshotCache = {
           screenshotBase64: croppedScreenshot,
           nativeImage: croppedNativeImage,
@@ -212,16 +325,6 @@ export async function captureWechatWindow(
   }
 }
 
-/**
- * 按绝对屏幕坐标矩形截图（box-select 路线用）。
- *
- * `rect` 是逻辑像素的绝对屏幕坐标（来自用户框选向导）。函数会查到该坐标所在
- * 显示器，按 scaleFactor 转成物理像素裁剪，返回 base64 dataURL + NativeImage。
- *
- * 没有像 captureWechatWindow 那样的缓存：BoxSelectDevice 自己控制采集节奏，
- * 一次轮询里 hasUnreadMessage / hasChatAreaChanged 都是各自截图各自比较，
- * 多余缓存反而引入"diff 不刷新"的微妙 bug。
- */
 export async function captureScreenRegion(rect: ScreenRect): Promise<{
   success: boolean
   screenshotBase64?: string
@@ -238,32 +341,14 @@ export async function captureScreenRegion(rect: ScreenRect): Promise<{
     })
 
     const scaleFactor = display.scaleFactor || 1
-    const physicalWidth = Math.round(display.bounds.width * scaleFactor)
-    const physicalHeight = Math.round(display.bounds.height * scaleFactor)
-
-    const timeoutPromise = new Promise((_, reject) => {
-      setTimeout(() => reject(new Error('desktopCapturer timeout')), 5000)
+    const frame = await getDisplayFrame({
+      id: display.id,
+      bounds: display.bounds,
+      scaleFactor
     })
-    const screenSources = (await Promise.race([
-      desktopCapturer.getSources({
-        types: ['screen'],
-        thumbnailSize: { width: physicalWidth, height: physicalHeight }
-      }),
-      timeoutPromise
-    ])) as Electron.DesktopCapturerSource[]
+    if (!frame) return { success: false, error: '未找到匹配的屏幕源' }
 
-    const matchedSource =
-      screenSources.find((s) => String(s.display_id) === String(display.id)) || screenSources[0]
-    if (!matchedSource) return { success: false, error: '未找到匹配的屏幕源' }
-
-    const cropRect = {
-      x: Math.round((rect.x - display.bounds.x) * scaleFactor),
-      y: Math.round((rect.y - display.bounds.y) * scaleFactor),
-      width: Math.max(1, Math.round(rect.width * scaleFactor)),
-      height: Math.max(1, Math.round(rect.height * scaleFactor))
-    }
-
-    const cropped = matchedSource.thumbnail.crop(cropRect)
+    const cropped = cropFromFrame(frame.thumbnail, display.bounds, scaleFactor, rect)
     return {
       success: true,
       screenshotBase64: cropped.toDataURL(),
@@ -275,17 +360,8 @@ export async function captureScreenRegion(rect: ScreenRect): Promise<{
   }
 }
 
-/**
- * 截图 chatMainArea 区域，返回 NativeImage
- *
- * 从 LayoutCache 获取 chatMainArea.bbox → 计算 crop 区域 → 局部截图
- * 用于 diff 检测：对比前后两张 chatMainArea 截图判断是否有新消息
- */
 export async function captureChatMainArea(appType: AppType): Promise<Electron.NativeImage | null> {
   try {
-    // 延迟导入避免循环引用
-    const { getLayoutCache, bboxToCropBounds } = await import('./vision-utils')
-
     const layout = getLayoutCache(appType)
     if (!layout?.chatMainArea) {
       console.log('[captureChatMainArea] 未找到 chatMainArea 缓存')
@@ -312,7 +388,6 @@ export async function captureChatMainArea(appType: AppType): Promise<Electron.Na
       return null
     }
 
-    // 从归一化 bbox (0-1000) 计算出 crop 区域（逻辑像素）
     const cropBounds = bboxToCropBounds(layout.chatMainArea.bbox, windowInfo.bounds)
     const crop = {
       x: cropBounds.x,
